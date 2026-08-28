@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.session
+*.session-journal
+downloads/
+database/waifus.db
+database/waifus.db-journal
+database/waifus.csv
+database/waifus.json
+.env
