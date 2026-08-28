@@ -4,9 +4,7 @@ __pycache__/
 *.pyd
 *.session
 *.session-journal
-downloads/
+downloads/images/
 database/waifus.db
 database/waifus.db-journal
-database/waifus.csv
-database/waifus.json
 .env
