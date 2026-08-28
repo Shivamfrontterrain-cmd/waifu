@@ -15,6 +15,7 @@ from config import (
     SESSION_NAME,
     FOLDER_NAME,
     DOWNLOAD_IMAGES,
+    CONCURRENT_DOWNLOADS,
     IMAGE_DIR,
     DB_PATH,
     EXPORT_JSON_PATH,
@@ -35,11 +36,12 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 logger = logging.getLogger("WaifuScraper")
 
 
-
 class TelegramWaifuScraper:
     def __init__(self):
         self.db = DatabaseManager(DB_PATH)
         self.client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+        self.semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
+        self.db_lock = asyncio.Lock()
 
     async def connect(self):
         """Connects and authenticates the Telegram client."""
@@ -47,6 +49,7 @@ class TelegramWaifuScraper:
         await self.client.start(phone=PHONE if PHONE else None)
         me = await self.client.get_me()
         logger.info(f"Successfully logged in as: {me.first_name} (@{me.username or 'No Username'}) [ID: {me.id}]")
+        logger.info(f"Parallel download workers: {CONCURRENT_DOWNLOADS} active streams")
 
     async def get_database_folder_channels(self, target_folder_name: str = FOLDER_NAME) -> List[types.TypeInputPeer]:
         """
@@ -64,7 +67,6 @@ class TelegramWaifuScraper:
         available_folders = []
 
         for f in filters_response.filters:
-            # DialogFilter has title
             title = None
             if hasattr(f, 'title'):
                 if hasattr(f.title, 'text'):
@@ -87,7 +89,6 @@ class TelegramWaifuScraper:
         logger.info(f"Found folder '{target_folder_name}'! Extracting channels...")
 
         channels = []
-        # include_peers contains input peers
         for peer in target_filter.include_peers:
             try:
                 entity = await self.client.get_entity(peer)
@@ -102,68 +103,42 @@ class TelegramWaifuScraper:
 
         return channels
 
-    async def scrape_channel(self, channel_entity):
-        """Scrapes all waifu artwork and metadata from a specific channel."""
-        channel_id = channel_entity.id
-        channel_title = getattr(channel_entity, 'title', f"channel_{channel_id}")
-        channel_username = getattr(channel_entity, 'username', None)
+    async def _process_message(self, message: types.Message, channel_id: int, channel_title: str, channel_image_dir: Path) -> bool:
+        """Processes a single message: parses text, downloads image via semaphore, and writes to DB."""
+        msg_id = message.id
+        raw_text = getattr(message, 'raw_text', '') or getattr(message, 'text', '') or getattr(message, 'message', '') or ""
 
-        safe_channel_folder = sanitize_filename(channel_title)
-        channel_image_dir = IMAGE_DIR / safe_channel_folder
-        channel_image_dir.mkdir(parents=True, exist_ok=True)
+        has_photo = getattr(message, 'photo', None) is not None
+        doc = getattr(message, 'document', None)
+        has_image_doc = (
+            doc is not None and
+            getattr(doc, 'mime_type', None) is not None and
+            doc.mime_type.startswith("image/")
+        )
 
-        logger.info(f"\n=======================================================")
-        logger.info(f"Starting scrape for: {channel_title} (ID: {channel_id})")
-        logger.info(f"=======================================================")
+        if not (has_photo or has_image_doc) and not raw_text.strip():
+            return False
 
-        count = 0
-        skipped = 0
+        # Parse character metadata
+        parsed = WaifuParser.parse(raw_text)
+        char_name = parsed["name"]
+        anime = parsed["anime"]
+        rarity = parsed["rarity"]
+        char_id = parsed["character_id"]
+        event = parsed["event"]
+        extra_info = parsed["extra_info"]
 
-        # Retrieve messages in reverse (from oldest to newest) for proper indexing
-        async for message in self.client.iter_messages(channel_entity, reverse=True):
-            if not message or not isinstance(message, types.Message):
-                continue
+        image_path = None
+        image_filename = None
 
-            msg_id = message.id
-            raw_text = getattr(message, 'raw_text', '') or getattr(message, 'text', '') or getattr(message, 'message', '') or ""
+        # Download photo concurrently using semaphore
+        if DOWNLOAD_IMAGES and (has_photo or has_image_doc):
+            safe_char_name = sanitize_filename(char_name)
+            image_filename = f"{safe_char_name}_{msg_id}.jpg"
+            dest_file_path = channel_image_dir / image_filename
 
-            # Check if message has media (Photo or Document image)
-            has_photo = getattr(message, 'photo', None) is not None
-            doc = getattr(message, 'document', None)
-            has_image_doc = (
-                doc is not None and
-                getattr(doc, 'mime_type', None) is not None and
-                doc.mime_type.startswith("image/")
-            )
-
-            # Skip messages without media unless they contain character info
-            if not (has_photo or has_image_doc) and not raw_text.strip():
-                continue
-
-            # Check if already processed
-            if self.db.is_message_processed(channel_id, msg_id):
-                skipped += 1
-                continue
-
-            # Parse character metadata
-            parsed = WaifuParser.parse(raw_text)
-            char_name = parsed["name"]
-            anime = parsed["anime"]
-            rarity = parsed["rarity"]
-            char_id = parsed["character_id"]
-            event = parsed["event"]
-            extra_info = parsed["extra_info"]
-
-            image_path = None
-            image_filename = None
-
-            # Download photo if requested
-            if DOWNLOAD_IMAGES and (has_photo or has_image_doc):
-                safe_char_name = sanitize_filename(char_name)
-                image_filename = f"{safe_char_name}_{msg_id}.jpg"
-                dest_file_path = channel_image_dir / image_filename
-
-                if not dest_file_path.exists():
+            if not dest_file_path.exists():
+                async with self.semaphore:
                     retries = 3
                     while retries > 0:
                         try:
@@ -171,16 +146,18 @@ class TelegramWaifuScraper:
                             image_path = str(dest_file_path.resolve())
                             break
                         except errors.FloodWaitError as fwe:
-                            logger.warning(f"FloodWait encountered! Sleeping for {fwe.seconds + 2}s...")
+                            logger.warning(f"FloodWait on msg {msg_id}: Sleeping for {fwe.seconds + 2}s...")
                             await asyncio.sleep(fwe.seconds + 2)
                         except Exception as e:
-                            logger.warning(f"Error downloading media for msg {msg_id}: {e}")
                             retries -= 1
-                            await asyncio.sleep(1)
-                else:
-                    image_path = str(dest_file_path.resolve())
+                            if retries == 0:
+                                logger.debug(f"Failed to download msg {msg_id}: {e}")
+                            await asyncio.sleep(0.5)
+            else:
+                image_path = str(dest_file_path.resolve())
 
-            # Save into Database
+        # Thread-safe database insert
+        async with self.db_lock:
             self.db.save_character(
                 telegram_msg_id=msg_id,
                 channel_id=channel_id,
@@ -195,15 +172,57 @@ class TelegramWaifuScraper:
                 extra_info=extra_info,
                 raw_text=raw_text
             )
+        return True
 
-            self.db.update_channel_progress(channel_id, channel_title, channel_username, msg_id)
-            count += 1
+    async def scrape_channel(self, channel_entity):
+        """Scrapes all waifu artwork and metadata from a channel in parallel batches."""
+        channel_id = channel_entity.id
+        channel_title = getattr(channel_entity, 'title', f"channel_{channel_id}")
+        channel_username = getattr(channel_entity, 'username', None)
 
-            if count % 25 == 0:
-                logger.info(f"[{channel_title}] Scraped {count} waifus so far (Skipped {skipped} already in DB)...")
+        safe_channel_folder = sanitize_filename(channel_title)
+        channel_image_dir = IMAGE_DIR / safe_channel_folder
+        channel_image_dir.mkdir(parents=True, exist_ok=True)
 
-            # Mild throttle to prevent aggressive spamming
-            await asyncio.sleep(0.05)
+        logger.info(f"\n=======================================================")
+        logger.info(f"Starting parallel scrape for: {channel_title} (ID: {channel_id})")
+        logger.info(f"=======================================================")
+
+        count = 0
+        skipped = 0
+        batch_tasks = []
+        BATCH_SIZE = CONCURRENT_DOWNLOADS * 3
+
+        async for message in self.client.iter_messages(channel_entity, reverse=True):
+            if not message or not isinstance(message, types.Message):
+                continue
+
+            msg_id = message.id
+
+            # Check if already processed
+            if self.db.is_message_processed(channel_id, msg_id):
+                skipped += 1
+                continue
+
+            # Add to parallel batch
+            task = self._process_message(message, channel_id, channel_title, channel_image_dir)
+            batch_tasks.append(task)
+
+            # Flush batch when ready
+            if len(batch_tasks) >= BATCH_SIZE:
+                results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                new_saved = sum(1 for r in results if r is True)
+                count += new_saved
+                batch_tasks = []
+                self.db.update_channel_progress(channel_id, channel_title, channel_username, msg_id)
+                logger.info(f"[{channel_title}] Scraped {count} waifus (Parallel) | Skipped {skipped} already in DB...")
+
+        # Process any remaining items in last batch
+        if batch_tasks:
+            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            new_saved = sum(1 for r in results if r is True)
+            count += new_saved
+            batch_tasks = []
 
         logger.info(f"Completed channel '{channel_title}': Scraped {count} new waifus, {skipped} skipped.")
 

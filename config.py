@@ -18,6 +18,7 @@ FOLDER_NAME = os.getenv("FOLDER_NAME", "databases").strip()
 
 # Settings
 DOWNLOAD_IMAGES = os.getenv("DOWNLOAD_IMAGES", "true").strip().lower() in ("true", "1", "yes")
+CONCURRENT_DOWNLOADS = int(os.getenv("CONCURRENT_DOWNLOADS", "8").strip()) if os.getenv("CONCURRENT_DOWNLOADS", "8").strip().isdigit() else 8
 IMAGE_DIR = BASE_DIR / os.getenv("IMAGE_DIR", "downloads/images")
 DATABASE_DIR = BASE_DIR / os.getenv("DATABASE_DIR", "database")
 DB_PATH = BASE_DIR / os.getenv("DB_FILE", "database/waifus.db")
