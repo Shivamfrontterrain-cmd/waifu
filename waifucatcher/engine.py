@@ -266,19 +266,10 @@ class WaifuGameEngine:
 
     def format_wild_spawn_caption(self, char: Dict[str, Any]) -> str:
         """Formats the caption for a wild character spawn in a group."""
-        anime = clean_text(char.get("anime") or "Unknown")
         rarity, color, _ = self.get_rarity_info(char.get("rarity"))
-        cid = char.get("character_id") or char.get("id")
-
         return (
-            "🌸 **A WILD WAIFU APPEARED!** 🌸\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎬 **Anime:** *{anime}*\n"
-            f"👑 **Rarity:** {color} **{rarity}**\n"
-            f"🆔 **Card ID:** `#{cid}`\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 **Type `/catch <name>` or `/grab <name>` to claim!**\n"
-            "*(First player to guess correctly gets the card + 💰 75 Coins!)*"
+            f"{color} **A new character appeared!**\n\n"
+            f"*Use* `/guess [name]` *to add them to your harem!*"
         )
 
     def format_claim_success_message(self, char: Dict[str, Any], user_name: str, total_owned: int) -> str:

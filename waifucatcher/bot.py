@@ -238,18 +238,14 @@ async def testspawn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = char.get("character_id") or char.get("id")
 
     test_caption = (
-        "🧪 **[SPAWN TEST MODE ACTIVE]** 🧪\n"
+        f"{color} **A new character appeared!**\n\n"
+        f"*Use* `/guess [name]` *to add them to your harem!*\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🌸 **A WILD WAIFU APPEARED!** 🌸\n"
+        "🧪 **[SPAWN TEST MODE ACTIVE]**\n"
         f"🎬 **Anime:** *{anime}*\n"
         f"👑 **Rarity:** {color} **{rarity}**\n"
         f"🆔 **Card ID:** `#{cid}`\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔍 **Answer Spoiler:** ||`{name}`||\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "💬 **Test claiming now:**\n"
-        f"• Type: `/catch {name}` (or `/grab`, `/claim`)\n"
-        "• Or send a screenshot/photo to test visual matching!"
+        f"🔍 **Answer Spoiler:** ||`{name}`||"
     )
 
     spawn_msg = await send_character_photo(context, chat.id, char, test_caption)
@@ -791,7 +787,7 @@ def main():
     app.add_handler(CommandHandler(["testspawn", "spawntest", "forcespawn", "testdrop"], testspawn_command))
     app.add_handler(CommandHandler(["spawndebug", "spawns", "currentspawn"], spawndebug_command))
     app.add_handler(CommandHandler(["clearspawn", "despawn"], clearspawn_command))
-    app.add_handler(CommandHandler(["catch", "grab", "claim"], catch_command))
+    app.add_handler(CommandHandler(["catch", "grab", "claim", "guess"], catch_command))
     app.add_handler(CommandHandler(["roll", "gacha", "pull"], roll_command))
     app.add_handler(CommandHandler(["harem", "collection", "mywaifus"], harem_command))
     app.add_handler(CommandHandler("fav", fav_command))
