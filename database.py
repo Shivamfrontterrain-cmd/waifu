@@ -63,6 +63,14 @@ class DatabaseManager:
                     UNIQUE(channel_id, telegram_msg_id)
                 )
             """)
+            # Automatic migration for existing databases
+            cursor.execute("PRAGMA table_info(characters)")
+            existing_cols = [row["name"] for row in cursor.fetchall()]
+
+            for col in ["telegram_file_id", "telegram_file_unique_id", "image_phash", "image_dhash"]:
+                if col not in existing_cols:
+                    cursor.execute(f"ALTER TABLE characters ADD COLUMN {col} TEXT")
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_char_name ON characters(name)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_char_anime ON characters(anime)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_char_phash ON characters(image_phash)")
