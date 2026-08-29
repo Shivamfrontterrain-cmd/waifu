@@ -36,9 +36,10 @@ class CloudImageStreamer:
 
     def __init__(self):
         self.client: Optional[TelegramClient] = None
-        self.semaphore = asyncio.Semaphore(10)
+        self.semaphore = asyncio.Semaphore(15)
         self._connected = False
         self._lock = asyncio.Lock()
+        self._cache: Dict[Tuple[int, int], bytes] = {}
 
     async def connect(self):
         async with self._lock:
@@ -64,6 +65,10 @@ class CloudImageStreamer:
 
     async def get_image_bytes(self, channel_id: int, msg_id: int) -> Optional[bytes]:
         """Fetches character thumbnail/photo directly into RAM (0 MB disk storage used)."""
+        cache_key = (channel_id, msg_id)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         if not self._connected or not self.client:
             await self.connect()
         if not self._connected or not self.client:
@@ -71,15 +76,27 @@ class CloudImageStreamer:
 
         async with self.semaphore:
             try:
-                msg = await self.client.get_messages(channel_id, ids=msg_id)
-                if not msg or not (getattr(msg, "photo", None) or getattr(msg, "document", None)):
-                    return None
-                buf = io.BytesIO()
-                await self.client.download_media(msg, file=buf, thumb=-1)
-                data = buf.getvalue()
-                return data if data else None
+                async def _fetch():
+                    msg = await self.client.get_messages(channel_id, ids=msg_id)
+                    if not msg or not (getattr(msg, "photo", None) or getattr(msg, "document", None)):
+                        return None
+                    buf = io.BytesIO()
+                    # thumb=0 extracts embedded PhotoStrippedSize in 0.001ms directly from message bytes
+                    await self.client.download_media(msg, file=buf, thumb=0)
+                    data = buf.getvalue()
+                    if not data:
+                        await self.client.download_media(msg, file=buf, thumb=1)
+                        data = buf.getvalue()
+                    return data if data else None
+
+                data = await asyncio.wait_for(_fetch(), timeout=2.0)
+                if data:
+                    if len(self._cache) > 2000:
+                        self._cache.pop(next(iter(self._cache)))
+                    self._cache[cache_key] = data
+                return data
             except Exception as e:
-                logger.debug(f"Error streaming cloud image ({channel_id}, {msg_id}): {e}")
+                logger.debug(f"Fast cloud streamer note ({channel_id}, {msg_id}): {e}")
                 return None
 
 
