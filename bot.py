@@ -27,7 +27,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, DB_PATH
 from database import DatabaseManager
 from matcher import WaifuMatcher
-from parser import clean_text, sanitize_character_name
+from parser import clean_text, sanitize_character_name, WaifuParser
 
 # Logging configuration
 logging.basicConfig(
