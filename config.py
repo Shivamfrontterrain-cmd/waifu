@@ -12,6 +12,7 @@ API_ID = int(API_ID_RAW) if API_ID_RAW.isdigit() else None
 API_HASH = os.getenv("TG_API_HASH", "").strip()
 PHONE = os.getenv("TG_PHONE", "").strip()
 SESSION_NAME = os.getenv("SESSION_NAME", "waifu_session").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 # Target Folder
 FOLDER_NAME = os.getenv("FOLDER_NAME", "databases").strip()
