@@ -1,4 +1,5 @@
 import io
+import re
 import time
 import logging
 import sys
@@ -26,6 +27,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, DB_PATH
 from database import DatabaseManager
 from matcher import WaifuMatcher
+from parser import clean_text
 
 # Logging configuration
 logging.basicConfig(
@@ -45,36 +47,67 @@ MAX_CACHE_SIZE = 1000
 BOT_START_TIME = time.time()
 
 
-def format_character_card(char: dict, include_claim: bool = True) -> str:
-    """Formats a clean, copyable character card for gacha players."""
-    name = char.get("name", "Unknown")
-    anime = char.get("anime", "Unknown")
-    rarity = char.get("rarity") or "Normal"
-    char_id = char.get("character_id")
-    event = char.get("event")
-    channel = char.get("channel_title")
-    confidence = char.get("confidence", 100.0)
-    match_type = char.get("match_type", "Database Match")
+def detect_claim_command(msg: Optional[Update.message]) -> str:
+    """
+    Detects the custom claim command from the image drop message
+    (e.g., /grab, /catch, /claim, /collect, /harem, /marry, /snatch, etc.).
+    Defaults to 'grab' if no command is specified.
+    """
+    if not msg:
+        return "grab"
 
-    card = [
-        "🎯 **Character Identified!**\n",
-        f"🌸 **Name:** `{name}` *(Tap name to copy)*",
-        f"🎬 **Anime:** *{anime}*",
-        f"👑 **Rarity:** {rarity}",
-    ]
+    text_sources = []
+    if msg.caption:
+        text_sources.append(msg.caption)
+    if msg.text:
+        text_sources.append(msg.text)
+    if msg.reply_to_message:
+        if msg.reply_to_message.caption:
+            text_sources.append(msg.reply_to_message.caption)
+        if msg.reply_to_message.text:
+            text_sources.append(msg.reply_to_message.text)
 
-    if char_id:
-        card.append(f"🆔 **ID:** `{char_id}`")
-    if event:
-        card.append(f"🎪 **Event:** {event}")
-    if channel:
-        card.append(f"📡 **Source:** {channel}")
+    for text in text_sources:
+        # Check for known gacha claim verbs
+        m_verb = re.search(
+            r'/(grab|catch|claim|collect|harem|snatch|marry|protect|take|roll|pick|get)\b',
+            text,
+            re.IGNORECASE
+        )
+        if m_verb:
+            return m_verb.group(1).lower()
 
-    if include_claim:
-        card.append(f"\n⚡ **Quick Claim:** `/claim {name}`")
+        # Check for any slash command followed by NAME, [NAME], TO CATCH, etc.
+        m_generic = re.search(
+            r'/([a-zA-Z0-9_]{2,16})\s+(?:\[?name\]?|to\s+catch|to\s+grab|to\s+claim|to\s+add)',
+            text,
+            re.IGNORECASE
+        )
+        if m_generic:
+            return m_generic.group(1).lower()
 
-    card.append(f"📊 **Accuracy:** `{confidence}%` *({match_type})*")
-    return "\n".join(card)
+    return "grab"
+
+
+def format_character_card(char: dict, command: str = "grab") -> str:
+    """
+    Formats the character card response in the exact requested monospace format:
+    
+    NAME : `Character Name`
+    ━━━━━━━━━━━━━━━━━━
+    🔹 Hint : `/command hint_name`
+    🔸 Full : `/command Character Name`
+    """
+    raw_name = char.get("name") or "Unknown"
+    clean_char_name = clean_text(raw_name).strip()
+    hint_name = clean_char_name.lower()
+
+    return (
+        f"NAME : `{clean_char_name}`\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔹 Hint : `/{command} {hint_name}`\n"
+        f"🔸 Full : `/{command} {clean_char_name}`"
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,12 +115,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_text = (
         f"🌸 **Hello, {user.first_name}!**\n\n"
-        f"I am the **Waifu & Anime Character Finder Bot**! 🎯⚡\n\n"
+        f"I am your **Ultra-Fast Waifu & Character Finder Bot**! 🎯⚡\n\n"
         f"**How to use me:**\n"
-        f"• **In DMs:** Send or forward any anime character image here.\n"
-        f"• **In Groups:** Reply to any character drop photo with `/find` or `/who`.\n"
+        f"• **In DMs:** Forward or send any dropped character image here.\n"
+        f"• **In Groups:** Reply to any character spawn with `/find` or `/who`.\n"
         f"• **Inline Mode:** Type `@{(await context.bot.get_me()).username} <name>` in any chat!\n\n"
-        f"I identify character names, anime origins, and rarities in **milliseconds**!"
+        f"I will instantly give you the **exact name and 1-tap claim command** in milliseconds!"
     )
     keyboard = [
         [
@@ -105,18 +138,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detailed help guide."""
     help_text = (
-        "📖 **Waifu Finder Bot Commands & Guide**\n\n"
+        "📖 **Waifu Finder Bot Guide**\n\n"
         "**Image Recognition:**\n"
-        "• Send or forward any character photo to identify them.\n"
+        "• Send or forward any character photo to get their 1-tap claim command.\n"
         "• In groups, reply to any image with `/find`, `/who`, `/guess`, or `/claim`.\n\n"
-        "**Text & Roster Commands:**\n"
+        "**Commands:**\n"
         "• `/search <name>` — Search waifus by name or anime\n"
         "• `/anime <title>` — View all characters from an anime\n"
         "• `/id <number>` — Look up character by gacha ID\n"
         "• `/random` — Drop a random character card\n"
         "• `/stats` — View live database statistics\n"
         "• `/reload` — Refresh database catalog from GitHub\n\n"
-        "*(Tip: Tap the character name in the reply to instantly copy it for claiming in gacha bots!)*"
+        "*(Tip: Tap the Hint or Full claim line to instantly copy and paste into group chats!)*"
     )
     await update.message.reply_text(help_text, parse_mode=constants.ParseMode.MARKDOWN)
 
@@ -166,9 +199,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = [f"🔍 **Search Results for:** `{query}`\n"]
     for idx, char in enumerate(results, 1):
-        name = char.get("name", "Unknown")
-        anime = char.get("anime", "Unknown")
-        rarity = char.get("rarity", "Normal")
+        name = clean_text(char.get("name") or "Unknown")
+        anime = clean_text(char.get("anime") or "Unknown")
+        rarity = char.get("rarity") or "Normal"
         cid = char.get("character_id")
         id_str = f" | 🆔 `{cid}`" if cid else ""
         response.append(f"**{idx}.** `{name}`\n   🎬 *{anime}* | 👑 {rarity}{id_str}\n")
@@ -197,8 +230,8 @@ async def anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = [f"🎬 **Characters from:** *{anime_query}*\n"]
     for idx, char in enumerate(results, 1):
-        name = char.get("name", "Unknown")
-        rarity = char.get("rarity", "Normal")
+        name = clean_text(char.get("name") or "Unknown")
+        rarity = char.get("rarity") or "Normal"
         response.append(f"**{idx}.** `{name}` — 👑 {rarity}")
 
     await update.message.reply_text("\n".join(response), parse_mode=constants.ParseMode.MARKDOWN)
@@ -216,7 +249,8 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_id = context.args[0]
     char = matcher.get_character_by_id(target_id)
     if char:
-        await update.message.reply_text(format_character_card(char), parse_mode=constants.ParseMode.MARKDOWN)
+        cmd = detect_claim_command(update.message)
+        await update.message.reply_text(format_character_card(char, command=cmd), parse_mode=constants.ParseMode.MARKDOWN)
     else:
         await update.message.reply_text(
             f"❌ Character ID `{target_id}` not found in database.",
@@ -228,7 +262,8 @@ async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Drops a random waifu card."""
     char = matcher.get_random_character()
     if char:
-        await update.message.reply_text(format_character_card(char), parse_mode=constants.ParseMode.MARKDOWN)
+        cmd = detect_claim_command(update.message)
+        await update.message.reply_text(format_character_card(char, command=cmd), parse_mode=constants.ParseMode.MARKDOWN)
     else:
         await update.message.reply_text("❌ Database is currently empty.")
 
@@ -252,17 +287,16 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     results = []
 
     if not query:
-        # Show random characters if query is empty
         chars = [matcher.get_random_character() for _ in range(5)]
         chars = [c for c in chars if c]
     else:
         chars = matcher.search_by_name(query, limit=10)
 
     for idx, char in enumerate(chars):
-        name = char.get("name", "Unknown")
-        anime = char.get("anime", "Unknown")
+        name = clean_text(char.get("name") or "Unknown")
+        anime = clean_text(char.get("anime") or "Unknown")
         rarity = char.get("rarity") or "Normal"
-        text_content = format_character_card(char)
+        text_content = format_character_card(char, command="grab")
 
         item = InlineQueryResultArticle(
             id=str(idx),
@@ -293,6 +327,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not photos_list:
         return
 
+    # Detect if the drop message specified /catch, /grab, /claim, /collect, etc.
+    claim_cmd = detect_claim_command(msg)
+
     # Use medium resolution for fast 20ms downloads
     target_photo = photos_list[1] if len(photos_list) > 1 else photos_list[0]
     unique_id = target_photo.file_unique_id
@@ -303,7 +340,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         RECENT_MATCH_CACHE.move_to_end(unique_id)
         if cached_result:
             await msg.reply_text(
-                format_character_card(cached_result),
+                format_character_card(cached_result, command=claim_cmd),
                 parse_mode=constants.ParseMode.MARKDOWN,
                 reply_to_message_id=msg.message_id
             )
@@ -328,7 +365,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     RECENT_MATCH_CACHE[unique_id] = match
 
     if match:
-        response_text = format_character_card(match)
+        response_text = format_character_card(match, command=claim_cmd)
         await msg.reply_text(
             response_text,
             parse_mode=constants.ParseMode.MARKDOWN,
@@ -371,6 +408,8 @@ def main():
     app.add_handler(CommandHandler("who", handle_photo_message))
     app.add_handler(CommandHandler("guess", handle_photo_message))
     app.add_handler(CommandHandler("claim", handle_photo_message))
+    app.add_handler(CommandHandler("grab", handle_photo_message))
+    app.add_handler(CommandHandler("catch", handle_photo_message))
 
     # Photos & Forwarded Media
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
