@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 CATCHER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CATCHER_DIR.parent
 
-# Load .env from project root
+# Load .env from waifucatcher directory, with fallback to project root
+load_dotenv(CATCHER_DIR / ".env")
 load_dotenv(PROJECT_ROOT / ".env")
 
 # Telegram Bot Credentials

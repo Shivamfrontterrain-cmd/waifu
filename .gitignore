@@ -5,6 +5,9 @@ __pycache__/
 *.session
 *.session-journal
 downloads/images/
-database/waifus.db
-database/waifus.db-journal
+database/*.db
+database/*.db-journal
+database/*.db-wal
+database/*.db-shm
 .env
+**/.env
