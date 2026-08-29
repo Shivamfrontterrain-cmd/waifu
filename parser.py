@@ -1,25 +1,48 @@
 import re
 import html
+import unicodedata
 from typing import Dict, Any, Optional
+
+
+def normalize_unicode_fonts(text: str) -> str:
+    """Normalizes stylized Unicode mathematical/script/fraktur/bold/italic text into plain ASCII/Unicode."""
+    if not text:
+        return ""
+    # NFKD decomposes stylized characters (e.g. 𝐑𝘆𝗼𝗺𝗲𝗻 -> Ryomen)
+    return unicodedata.normalize('NFKD', text)
 
 
 def clean_text(text: str) -> str:
     """Removes telegram markdown artifacts, extra spaces, and unescapes HTML."""
     if not text:
         return ""
+    text = normalize_unicode_fonts(text)
     # Strip markdown symbols like **, __, ``, ~~
     text = re.sub(r'[*_`~]+', '', text)
     text = html.unescape(text)
-    # Remove zero-width spaces & normalize spaces
+    # Remove zero-width spaces & non-printing characters
     text = text.replace('\u200b', '').replace('\u200e', '').replace('\u200f', '').replace('\ufeff', '')
     return text.strip()
+
+
+def strip_field_prefix(val: str, field_names: list) -> str:
+    """Strips accidental lingering prefixes like 'Name:', 'Anime:', '👤', etc. from extracted values."""
+    if not val:
+        return val
+    cleaned = clean_text(val)
+    # Remove emojis at start
+    cleaned = re.sub(r'^[^\w\s\(\)\[\]]+', '', cleaned).strip()
+    # Remove field keywords
+    for fn in field_names:
+        pat = rf'^(?:{fn})\s*[:：\-—=]\s*'
+        cleaned = re.sub(pat, '', cleaned, flags=re.IGNORECASE).strip()
+    return cleaned.strip(' -:—=')
 
 
 def sanitize_filename(name: str, max_length: int = 60) -> str:
     """Sanitizes strings to be valid file names across Windows and POSIX."""
     if not name:
         return "unnamed"
-    # Remove invalid characters: < > : " / \ | ? *
     sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
     sanitized = re.sub(r'\s+', '_', sanitized).strip('._- ')
     if not sanitized:
@@ -30,7 +53,7 @@ def sanitize_filename(name: str, max_length: int = 60) -> str:
 class WaifuParser:
     """Smart parser for extracting waifu/character metadata from message captions/text."""
 
-    # Common Key Regex Patterns
+    # Common Key Regex Patterns (Applied after NFKD normalization)
     NAME_PATTERNS = [
         r'(?:name|character|waifu|husbando|char|hero|heroine)\s*[:：\-—=]\s*(.+)',
         r'(?:🌸|👤|💮|🎀|💖|✨|🪄|👧|👩)\s*(?:name|character)?\s*[:：\-—]?\s*(.+)',
@@ -73,8 +96,9 @@ class WaifuParser:
                 "raw_text": ""
             }
 
-        raw_text = raw_caption.strip()
-        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        # Normalize unicode fonts across the whole text
+        normalized_raw = normalize_unicode_fonts(raw_caption.strip())
+        lines = [line.strip() for line in normalized_raw.splitlines() if line.strip()]
 
         name = None
         anime = None
@@ -100,93 +124,86 @@ class WaifuParser:
                 for pat in cls.NAME_PATTERNS:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
-                        name = clean_text(m.group(1))
+                        name = strip_field_prefix(m.group(1), ["name", "character", "waifu", "char"])
                         break
 
-            # Check Anime / Source
+            # Check Anime
             if not anime:
                 for pat in cls.ANIME_PATTERNS:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
-                        anime = clean_text(m.group(1))
+                        anime = strip_field_prefix(m.group(1), ["anime", "source", "from", "series", "origin"])
                         break
 
             # Check Rarity
             if not rarity:
-                # Check if the line is purely stars
-                pure_stars = re.fullmatch(r'\s*[⭐★✨\s]{1,10}\s*', line)
-                if pure_stars:
-                    star_count = len(re.findall(r'[⭐★✨]', line))
-                    rarity = f"{star_count} Stars"
-                else:
-                    for pat in cls.RARITY_PATTERNS:
-                        m = re.search(pat, line, re.IGNORECASE)
-                        if m:
-                            val = clean_text(m.group(1))
-                            if val:
-                                rarity = val
-                                break
+                for pat in cls.RARITY_PATTERNS:
+                    m = re.search(pat, line, re.IGNORECASE)
+                    if m:
+                        rarity = strip_field_prefix(m.group(1), ["rarity", "tier", "rank", "stars", "rating"])
+                        break
 
             # Check Event
             if not event:
                 for pat in cls.EVENT_PATTERNS:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
-                        event = clean_text(m.group(1))
+                        event = strip_field_prefix(m.group(1), ["event", "edition", "version", "type", "theme"])
                         break
 
-            # Generic Key-Value fallback (e.g. "Favorites: 123", "Gender: Female")
-            kv_match = re.match(r'^([A-Za-z\s]+)[:：]\s*(.+)$', cleaned_line)
-            if kv_match:
-                k = kv_match.group(1).strip().lower()
-                v = kv_match.group(2).strip()
-                if k not in ("name", "anime", "rarity", "id", "character", "source", "tier"):
-                    extra_info[k] = v
+        # 2. Key-Value Fallback (Generic separator detection)
+        if not name or not anime:
+            for line in lines:
+                if any(delim in line for delim in [':', '：', '-', '—', '=']):
+                    parts = re.split(r'[:：\-—=]', line, maxsplit=1)
+                    if len(parts) == 2:
+                        k = clean_text(parts[0]).lower()
+                        v = clean_text(parts[1])
+                        if not v:
+                            continue
+                        if not name and any(x in k for x in ['name', 'char', 'waifu', '👤', '🌸']):
+                            name = strip_field_prefix(v, ["name", "character", "waifu"])
+                        elif not anime and any(x in k for x in ['anime', 'source', 'from', 'series', '📺', '🎬']):
+                            anime = strip_field_prefix(v, ["anime", "source", "from", "series"])
+                        elif not rarity and any(x in k for x in ['rarity', 'tier', 'rank', '👑', '⭐', '💎']):
+                            rarity = strip_field_prefix(v, ["rarity", "tier", "rank"])
+                        elif not character_id and any(x in k for x in ['id', 'code', '🆔', '🔢']):
+                            character_id = strip_field_prefix(v, ["id", "code"])
+                        else:
+                            extra_info[k] = v
 
-        # 2. Heuristic fallback if Name is still not found
+        # 3. Structural Bracket Fallback (e.g. [Anime Title] Character Name)
         if not name and lines:
-            first_line = clean_text(lines[0])
-
-            # Check for bracket/separator format: "Name - Anime" or "Name | Anime" or "Name (Anime)"
-            sep_match = re.match(r'^(.+?)\s*[\-|–—|/]\s*(.+)$', first_line)
-            paren_match = re.match(r'^(.+?)\s*\((.+?)\)$', first_line)
-            bracket_match = re.match(r'^[【\[](.+?)[】\]]\s*(.*)$', first_line)
-
-            if sep_match:
-                name = clean_text(sep_match.group(1))
+            first_line = lines[0]
+            bracket_match = re.search(r'[\[\(\{](.+?)[\]\)\}](.+)', first_line)
+            if bracket_match:
+                anime_cand = clean_text(bracket_match.group(1))
+                name_cand = clean_text(bracket_match.group(2))
                 if not anime:
-                    anime = clean_text(sep_match.group(2))
-            elif paren_match:
-                name = clean_text(paren_match.group(1))
-                if not anime:
-                    anime = clean_text(paren_match.group(2))
-            elif bracket_match:
-                name = clean_text(bracket_match.group(1))
-                if not anime and bracket_match.group(2):
-                    anime = clean_text(bracket_match.group(2))
+                    anime = anime_cand
+                if not name:
+                    name = name_cand
+
+        # 4. Clean Fallbacks & Defaults
+        if not name:
+            if lines and not any(k in lines[0].lower() for k in ['added', 'update', 'database', 'channel']):
+                name = clean_text(lines[0])
             else:
-                # Use entire first line as character name
-                name = first_line
+                name = "Unknown"
 
-        # 3. Heuristic fallback for Anime if second line exists and anime not found
-        if not anime and len(lines) > 1 and not lines[1].startswith(('http', '#', '🆔', 'ID:')):
-            second_line = clean_text(lines[1])
-            # Only use if not a key-value pair of something else and not a star rating
-            if not re.search(r'(rarity|tier|event|rank|id|code)[:：]', second_line, re.IGNORECASE) and not re.match(r'^[⭐★✨\s]+$', second_line):
-                anime = second_line
+        if not anime:
+            anime = "Unknown"
 
-        # Clean star counts for rarity if standalone stars found anywhere in text
-        if not rarity:
-            stars_match = re.search(r'[⭐★✨]{1,7}', raw_text)
-            if stars_match:
-                rarity = f"{len(stars_match.group(0))} Stars"
+        # Final cleanup pass
+        name = strip_field_prefix(name, ["name", "character", "waifu", "char"]) or "Unknown"
+        anime = strip_field_prefix(anime, ["anime", "source", "from", "series", "origin"]) or "Unknown"
 
         return {
-            "name": name or "Unknown",
-            "anime": anime or "Unknown",
-            "rarity": rarity or "Normal",
+            "name": name,
+            "anime": anime,
+            "rarity": rarity,
             "character_id": character_id,
             "event": event,
             "extra_info": extra_info,
-            "raw_text": raw_text
+            "raw_text": normalized_raw
         }

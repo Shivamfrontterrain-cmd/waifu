@@ -1,10 +1,10 @@
 import io
 import json
 import logging
+import random
 import urllib.request
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-from functools import lru_cache
 
 from PIL import Image
 import imagehash
@@ -36,7 +36,6 @@ def compute_image_hashes(img_input: Any) -> Optional[Tuple[str, str, int, int]]:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Fast perceptual & difference hash computation
         p_obj = imagehash.phash(img)
         d_obj = imagehash.dhash(img)
 
@@ -52,14 +51,18 @@ def compute_image_hashes(img_input: Any) -> Optional[Tuple[str, str, int, int]]:
 
 
 class WaifuMatcher:
-    """Ultra-fast visual matcher using native CPU 64-bit POPCNT integer comparison."""
+    """Multi-layer recognition engine: O(1) Unique ID mapping, CPU POPCNT Visual Search & Fuzzy Text Index."""
 
     def __init__(self, db_path: Path = DB_PATH, github_url: str = GITHUB_DATA_URL):
         self.github_url = github_url
         self.db_path = db_path
         self.db_manager = DatabaseManager(db_path)
-        # Array of (phash_int, dhash_int, character_data_dict)
-        self.index: List[Tuple[int, int, Dict[str, Any]]] = []
+        # Unique ID hashmap for instant O(1) Telegram forward matching
+        self.unique_id_map: Dict[str, Dict[str, Any]] = {}
+        # Array of (phash_int, dhash_int, character_data_dict) for visual recognition
+        self.visual_index: List[Tuple[int, int, Dict[str, Any]]] = []
+        # All loaded character records
+        self.all_characters: List[Dict[str, Any]] = []
         self.load_index()
 
     def load_index_from_github(self) -> bool:
@@ -68,38 +71,55 @@ class WaifuMatcher:
             logger.info(f"Connecting to GitHub Cloud Database: {self.github_url}...")
             req = urllib.request.Request(
                 self.github_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaifuBot/1.0"}
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaifuBot/2.0"}
             )
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=12) as response:
                 if response.status == 200:
                     raw_data = response.read().decode("utf-8")
                     characters = json.loads(raw_data)
 
-                    loaded = []
+                    v_loaded = []
+                    u_map = {}
+                    all_chars = []
+
                     for item in characters:
-                        if not item.get("name") or item.get("name") == "Unknown":
+                        name = item.get("name")
+                        if not name or name == "Unknown":
                             continue
+
+                        all_chars.append(item)
+
+                        # Unique ID Map
+                        uid = item.get("telegram_file_unique_id")
+                        if uid:
+                            u_map[str(uid)] = item
+
+                        # Visual Hashes
                         p_str = item.get("image_phash")
                         d_str = item.get("image_dhash")
-
                         if p_str:
                             try:
                                 p_int = int(p_str, 16)
                                 d_int = int(d_str, 16) if d_str else p_int
-                                loaded.append((p_int, d_int, item))
+                                v_loaded.append((p_int, d_int, item))
                             except ValueError:
                                 continue
 
-                    if loaded:
-                        self.index = loaded
-                        logger.info(f"⚡ Ultra-Fast Index: {len(self.index):,} characters loaded in memory!")
+                    if all_chars:
+                        self.visual_index = v_loaded
+                        self.unique_id_map = u_map
+                        self.all_characters = all_chars
+                        logger.info(
+                            f"✅ Loaded {len(self.all_characters):,} characters from GitHub Cloud Database! "
+                            f"(Visual: {len(self.visual_index):,}, Unique IDs: {len(self.unique_id_map):,})"
+                        )
                         return True
         except Exception as e:
             logger.warning(f"Could not load directly from GitHub ({e}). Checking local database...")
         return False
 
     def load_index(self):
-        """Loads index: prioritizes GitHub Cloud Database, with local database fallback."""
+        """Loads index prioritizing GitHub Cloud Database, falling back to local SQLite."""
         if self.load_index_from_github():
             return
 
@@ -111,36 +131,58 @@ class WaifuMatcher:
                            telegram_file_id, telegram_file_unique_id,
                            channel_title, image_phash, image_dhash
                     FROM characters
-                    WHERE image_phash IS NOT NULL AND image_phash != '' AND name != 'Unknown'
+                    WHERE name IS NOT NULL AND name != 'Unknown'
                 """)
                 rows = cursor.fetchall()
 
-                loaded = []
+                v_loaded = []
+                u_map = {}
+                all_chars = []
+
                 for row in rows:
                     item = dict(row)
+                    all_chars.append(item)
+
+                    uid = item.get("telegram_file_unique_id")
+                    if uid:
+                        u_map[str(uid)] = item
+
                     p_str = item.get("image_phash")
                     d_str = item.get("image_dhash")
                     if p_str:
                         try:
                             p_int = int(p_str, 16)
                             d_int = int(d_str, 16) if d_str else p_int
-                            loaded.append((p_int, d_int, item))
+                            v_loaded.append((p_int, d_int, item))
                         except ValueError:
                             continue
 
-                self.index = loaded
-                logger.info(f"⚡ Loaded {len(self.index):,} characters into ultra-fast active CPU memory.")
+                self.visual_index = v_loaded
+                self.unique_id_map = u_map
+                self.all_characters = all_chars
+                logger.info(
+                    f"⚡ Loaded {len(self.all_characters):,} characters from local SQLite. "
+                    f"(Visual: {len(self.visual_index):,}, Unique IDs: {len(self.unique_id_map):,})"
+                )
         except Exception as e:
             logger.error(f"Error loading local index: {e}")
 
-    def find_match(self, query_img: Any, max_distance: int = 14) -> Optional[Dict[str, Any]]:
-        """
-        Ultra-fast visual matching in < 1 millisecond using native CPU bit_count instructions.
-        """
-        if not self.index:
-            self.load_index()
-            if not self.index:
-                return None
+    def find_match_by_unique_id(self, unique_id: str) -> Optional[Dict[str, Any]]:
+        """Instant O(1) matching for forwarded images using Telegram file_unique_id."""
+        if not unique_id:
+            return None
+        match = self.unique_id_map.get(str(unique_id))
+        if match:
+            res = dict(match)
+            res["confidence"] = 100.0
+            res["match_type"] = "Cloud Telegram Unique ID Match"
+            return res
+        return None
+
+    def find_match_by_image(self, query_img: Any, max_distance: int = 14) -> Optional[Dict[str, Any]]:
+        """Hardware-accelerated CPU POPCNT visual matching in < 1 millisecond."""
+        if not self.visual_index:
+            return None
 
         hashes = compute_image_hashes(query_img)
         if not hashes:
@@ -151,8 +193,7 @@ class WaifuMatcher:
         best_match = None
         min_distance = 999
 
-        # Native CPU bitwise XOR + bit_count (POPCNT) loop
-        for s_phash, s_dhash, char_data in self.index:
+        for s_phash, s_dhash, char_data in self.visual_index:
             dist_p = (q_phash ^ s_phash).bit_count()
             dist_d = (q_dhash ^ s_dhash).bit_count()
             combined_dist = (dist_p * 0.6) + (dist_d * 0.4)
@@ -160,7 +201,6 @@ class WaifuMatcher:
             if combined_dist < min_distance:
                 min_distance = combined_dist
                 best_match = char_data
-                # Instant exact match early break
                 if min_distance == 0:
                     break
 
@@ -169,22 +209,67 @@ class WaifuMatcher:
             result = dict(best_match)
             result["confidence"] = round(confidence, 1)
             result["hamming_distance"] = round(min_distance, 2)
+            result["match_type"] = "Perceptual Visual Recognition"
             return result
 
         return None
 
-    def search_by_name(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Searches characters by text query directly in memory."""
+    def search_by_name(self, query: str, limit: int = 6) -> List[Dict[str, Any]]:
+        """Searches characters by name, anime, or ID directly in memory."""
         if not query or not query.strip():
             return []
         q = query.strip().lower()
 
+        exact_matches = []
+        partial_matches = []
+
+        for char in self.all_characters:
+            name = (char.get("name") or "").lower()
+            anime = (char.get("anime") or "").lower()
+            cid = str(char.get("character_id") or "").lower()
+
+            if q == name or q == cid:
+                exact_matches.append(char)
+            elif q in name or q in anime or q in cid:
+                partial_matches.append(char)
+
+            if len(exact_matches) + len(partial_matches) >= limit * 2:
+                break
+
+        combined = exact_matches + partial_matches
+        return combined[:limit]
+
+    def search_by_anime(self, anime_query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Returns all characters belonging to a specific anime series."""
+        if not anime_query or not anime_query.strip():
+            return []
+        q = anime_query.strip().lower()
         results = []
-        for _, _, char in self.index:
-            name = char.get("name", "").lower()
-            anime = char.get("anime", "").lower()
-            if q in name or q in anime:
+        for char in self.all_characters:
+            anime = (char.get("anime") or "").lower()
+            if q in anime:
                 results.append(char)
                 if len(results) >= limit:
                     break
         return results
+
+    def get_character_by_id(self, char_id: str) -> Optional[Dict[str, Any]]:
+        """Finds a character by their exact character ID."""
+        if not char_id:
+            return None
+        target = str(char_id).strip().lower().lstrip("#")
+        for char in self.all_characters:
+            cid = str(char.get("character_id") or "").strip().lower().lstrip("#")
+            if cid == target:
+                return char
+        return None
+
+    def get_random_character(self) -> Optional[Dict[str, Any]]:
+        """Returns a random character from the loaded catalog."""
+        if not self.all_characters:
+            return None
+        return random.choice(self.all_characters)
+
+    def reload(self):
+        """Refreshes the database catalog into memory."""
+        self.load_index()

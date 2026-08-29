@@ -1,14 +1,24 @@
 import io
+import time
 import logging
 import sys
 from pathlib import Path
 from collections import OrderedDict
+from typing import Optional
 
-from telegram import Update, constants
+from telegram import (
+    Update,
+    constants,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    InlineQueryHandler,
     ContextTypes,
     filters,
 )
@@ -17,7 +27,7 @@ from config import BOT_TOKEN, DB_PATH
 from database import DatabaseManager
 from matcher import WaifuMatcher
 
-# Logging setup
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -25,56 +35,112 @@ logging.basicConfig(
 )
 logger = logging.getLogger("WaifuBot")
 
-# Initialize database and ultra-fast matcher engine
+# Initialize database and matcher engine
 db_manager = DatabaseManager(DB_PATH)
 matcher = WaifuMatcher(DB_PATH)
 
-# In-memory LRU cache for 0ms repeated lookups (max 500 items)
+# In-memory LRU cache for 0ms repeat lookups
 RECENT_MATCH_CACHE: OrderedDict[str, dict] = OrderedDict()
-MAX_CACHE_SIZE = 500
+MAX_CACHE_SIZE = 1000
+BOT_START_TIME = time.time()
+
+
+def format_character_card(char: dict, include_claim: bool = True) -> str:
+    """Formats a clean, copyable character card for gacha players."""
+    name = char.get("name", "Unknown")
+    anime = char.get("anime", "Unknown")
+    rarity = char.get("rarity") or "Normal"
+    char_id = char.get("character_id")
+    event = char.get("event")
+    channel = char.get("channel_title")
+    confidence = char.get("confidence", 100.0)
+    match_type = char.get("match_type", "Database Match")
+
+    card = [
+        "🎯 **Character Identified!**\n",
+        f"🌸 **Name:** `{name}` *(Tap name to copy)*",
+        f"🎬 **Anime:** *{anime}*",
+        f"👑 **Rarity:** {rarity}",
+    ]
+
+    if char_id:
+        card.append(f"🆔 **ID:** `{char_id}`")
+    if event:
+        card.append(f"🎪 **Event:** {event}")
+    if channel:
+        card.append(f"📡 **Source:** {channel}")
+
+    if include_claim:
+        card.append(f"\n⚡ **Quick Claim:** `/claim {name}`")
+
+    card.append(f"📊 **Accuracy:** `{confidence}%` *({match_type})*")
+    return "\n".join(card)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message and instructions."""
+    """Interactive welcome banner and menu."""
     user = update.effective_user
     welcome_text = (
-        f"🌸 **Welcome, {user.first_name}!**\n\n"
-        f"I am the **Ultra-Fast Waifu & Character Finder Bot**! ⚡\n\n"
+        f"🌸 **Hello, {user.first_name}!**\n\n"
+        f"I am the **Waifu & Anime Character Finder Bot**! 🎯⚡\n\n"
         f"**How to use me:**\n"
-        f"1. **Forward or send any anime character photo** here.\n"
-        f"2. In group chats, **reply to any character image** with `/find` or `/who`.\n"
-        f"3. I will instantly identify their **Name, Anime Series, and Rarity** in milliseconds!\n\n"
-        f"**Useful Commands:**\n"
-        f"• `/search <name>` — Search character by text\n"
-        f"• `/stats` — View total indexed waifus in database\n"
-        f"• `/help` — How to use this bot"
+        f"• **In DMs:** Send or forward any anime character image here.\n"
+        f"• **In Groups:** Reply to any character drop photo with `/find` or `/who`.\n"
+        f"• **Inline Mode:** Type `@{(await context.bot.get_me()).username} <name>` in any chat!\n\n"
+        f"I identify character names, anime origins, and rarities in **milliseconds**!"
     )
-    await update.message.reply_text(welcome_text, parse_mode=constants.ParseMode.MARKDOWN)
+    keyboard = [
+        [
+            InlineKeyboardButton("🔍 Search Characters", switch_inline_query_current_chat=""),
+            InlineKeyboardButton("📊 Database Stats", callback_data="stats_btn")
+        ]
+    ]
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode=constants.ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help guide."""
+    """Detailed help guide."""
     help_text = (
-        "📖 **Waifu Finder Bot Help**\n\n"
-        "• **Photo Lookup**: Simply send or forward any character artwork to this chat.\n"
-        "• **In Groups**: Add me to your group, and reply to any dropped character photo with `/find` or `/who`.\n"
-        "• **Name Search**: Use `/search Rem` or `/search Attack on Titan` to search by text.\n\n"
-        "*(Tip: Tap the character name in the bot's reply to instantly copy it for claiming in gacha bots!)*"
+        "📖 **Waifu Finder Bot Commands & Guide**\n\n"
+        "**Image Recognition:**\n"
+        "• Send or forward any character photo to identify them.\n"
+        "• In groups, reply to any image with `/find`, `/who`, `/guess`, or `/claim`.\n\n"
+        "**Text & Roster Commands:**\n"
+        "• `/search <name>` — Search waifus by name or anime\n"
+        "• `/anime <title>` — View all characters from an anime\n"
+        "• `/id <number>` — Look up character by gacha ID\n"
+        "• `/random` — Drop a random character card\n"
+        "• `/stats` — View live database statistics\n"
+        "• `/reload` — Refresh database catalog from GitHub\n\n"
+        "*(Tip: Tap the character name in the reply to instantly copy it for claiming in gacha bots!)*"
     )
     await update.message.reply_text(help_text, parse_mode=constants.ParseMode.MARKDOWN)
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays database statistics."""
+    """Displays live database statistics and bot uptime."""
     stats = db_manager.get_stats()
-    indexed_count = len(matcher.index)
+    total_chars = len(matcher.all_characters) or stats['total_characters']
+    unique_ids = len(matcher.unique_id_map)
+    visual_hashes = len(matcher.visual_index)
+
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    mins, secs = divmod(uptime_sec, 60)
+    hours, mins = divmod(mins, 60)
+
     stats_text = (
         "📊 **Waifu Database Statistics**\n\n"
-        f"🌸 **Total Characters in DB**: `{stats['total_characters']:,}`\n"
-        f"⚡ **Ultra-Fast Visual Index**: `{indexed_count:,}` active characters in RAM\n"
-        f"🎬 **Unique Anime Franchises**: `{stats['unique_animes']:,}`\n"
-        f"📡 **Source Channels**: `{stats['total_channels']}`\n\n"
-        f"⚡ *Response Time: < 5 milliseconds*"
+        f"🌸 **Total Characters**: `{total_chars:,}`\n"
+        f"⚡ **Unique ID Index**: `{unique_ids:,}` instant cloud maps\n"
+        f"🖼️ **Visual Hashes**: `{visual_hashes:,}` active perceptual models\n"
+        f"🎬 **Unique Animes**: `{stats['unique_animes']:,}` franchises\n"
+        f"📡 **Source Channels**: `{stats['total_channels']}` database channels\n"
+        f"⏱️ **Bot Uptime**: `{hours}h {mins}m {secs}s`\n\n"
+        f"⚡ *Response Latency: < 5 milliseconds*"
     )
     await update.message.reply_text(stats_text, parse_mode=constants.ParseMode.MARKDOWN)
 
@@ -83,7 +149,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Searches characters by text query."""
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Please provide a name to search!\nExample: `/search Rem` or `/search Naruto`",
+            "⚠️ Please provide a name to search!\nExample: `/search Rem` or `/search Sukuna`",
             parse_mode=constants.ParseMode.MARKDOWN
         )
         return
@@ -103,41 +169,117 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = char.get("name", "Unknown")
         anime = char.get("anime", "Unknown")
         rarity = char.get("rarity", "Normal")
-        response.append(
-            f"**{idx}.** `{name}`\n"
-            f"   🎬 *{anime}* | 👑 {rarity}\n"
-        )
+        cid = char.get("character_id")
+        id_str = f" | 🆔 `{cid}`" if cid else ""
+        response.append(f"**{idx}.** `{name}`\n   🎬 *{anime}* | 👑 {rarity}{id_str}\n")
 
     await update.message.reply_text("\n".join(response), parse_mode=constants.ParseMode.MARKDOWN)
 
 
-def format_character_card(char: dict) -> str:
-    """Formats a matched character card with copyable name."""
-    name = char.get("name", "Unknown")
-    anime = char.get("anime", "Unknown")
-    rarity = char.get("rarity") or "Normal"
-    char_id = char.get("character_id")
-    event = char.get("event")
-    confidence = char.get("confidence", 100.0)
+async def anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Returns character roster from a specific anime series."""
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Please provide an anime name!\nExample: `/anime Jujutsu Kaisen` or `/anime Naruto`",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+        return
 
-    card = [
-        "🎯 **Character Identified!**\n",
-        f"🌸 **Name:** `{name}` *(Tap name to copy)*",
-        f"🎬 **Anime:** *{anime}*",
-        f"👑 **Rarity:** {rarity}",
-    ]
+    anime_query = " ".join(context.args)
+    results = matcher.search_by_anime(anime_query, limit=8)
 
-    if char_id:
-        card.append(f"🆔 **ID:** `{char_id}`")
-    if event:
-        card.append(f"🎪 **Event:** {event}")
+    if not results:
+        await update.message.reply_text(
+            f"❌ No characters found from anime: `{anime_query}`",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+        return
 
-    card.append(f"\n📊 **Accuracy:** `{confidence}%`")
-    return "\n".join(card)
+    response = [f"🎬 **Characters from:** *{anime_query}*\n"]
+    for idx, char in enumerate(results, 1):
+        name = char.get("name", "Unknown")
+        rarity = char.get("rarity", "Normal")
+        response.append(f"**{idx}.** `{name}` — 👑 {rarity}")
+
+    await update.message.reply_text("\n".join(response), parse_mode=constants.ParseMode.MARKDOWN)
+
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Looks up a character by their exact character ID."""
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Please provide a character ID!\nExample: `/id 1` or `/id 1042`",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+        return
+
+    target_id = context.args[0]
+    char = matcher.get_character_by_id(target_id)
+    if char:
+        await update.message.reply_text(format_character_card(char), parse_mode=constants.ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(
+            f"❌ Character ID `{target_id}` not found in database.",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+
+
+async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Drops a random waifu card."""
+    char = matcher.get_random_character()
+    if char:
+        await update.message.reply_text(format_character_card(char), parse_mode=constants.ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("❌ Database is currently empty.")
+
+
+async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hot-reloads the database catalog from GitHub or SQLite."""
+    status_msg = await update.message.reply_text("🔄 Syncing latest database from GitHub Cloud...")
+    matcher.reload()
+    total_chars = len(matcher.all_characters)
+    await status_msg.edit_text(
+        f"✅ **Database Synced Successfully!**\n\n"
+        f"🌸 Active Catalog: `{total_chars:,}` characters in memory\n"
+        f"⚡ Cloud Unique IDs: `{len(matcher.unique_id_map):,}` mapped",
+        parse_mode=constants.ParseMode.MARKDOWN
+    )
+
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Supports inline query mode (@YourBotName <query>)."""
+    query = update.inline_query.query.strip()
+    results = []
+
+    if not query:
+        # Show random characters if query is empty
+        chars = [matcher.get_random_character() for _ in range(5)]
+        chars = [c for c in chars if c]
+    else:
+        chars = matcher.search_by_name(query, limit=10)
+
+    for idx, char in enumerate(chars):
+        name = char.get("name", "Unknown")
+        anime = char.get("anime", "Unknown")
+        rarity = char.get("rarity") or "Normal"
+        text_content = format_character_card(char)
+
+        item = InlineQueryResultArticle(
+            id=str(idx),
+            title=name,
+            description=f"{anime} | {rarity}",
+            input_message_content=InputTextMessageContent(
+                text_content,
+                parse_mode=constants.ParseMode.MARKDOWN
+            )
+        )
+        results.append(item)
+
+    await update.inline_query.answer(results, cache_time=5)
 
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes incoming character photos with ultra-low latency."""
+    """Processes incoming photos with high-speed multi-stage recognition."""
     msg = update.message
     if not msg:
         return
@@ -151,12 +293,11 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not photos_list:
         return
 
-    # SPEED OPTIMIZATION:
-    # Use medium resolution (e.g. photos_list[1] or photos_list[0]) for 20ms downloads instead of large 4K photos
+    # Use medium resolution for fast 20ms downloads
     target_photo = photos_list[1] if len(photos_list) > 1 else photos_list[0]
     unique_id = target_photo.file_unique_id
 
-    # 1. Check in-memory 0ms cache
+    # 1. Check LRU Cache (0 ms)
     if unique_id in RECENT_MATCH_CACHE:
         cached_result = RECENT_MATCH_CACHE[unique_id]
         RECENT_MATCH_CACHE.move_to_end(unique_id)
@@ -168,36 +309,38 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-    try:
-        # Download lightweight thumbnail in memory (< 20ms)
-        photo_file = await target_photo.get_file()
-        photo_bytes = await photo_file.download_as_bytearray()
-        image_stream = io.BytesIO(photo_bytes)
+    # 2. Check O(1) Cloud Unique ID Match (0.0001 ms)
+    match = matcher.find_match_by_unique_id(unique_id)
 
-        # Match against CPU-accelerated visual index (< 1ms)
-        match = matcher.find_match(image_stream)
+    # 3. Fallback to Visual Perceptual Hash Match (< 1 ms)
+    if not match:
+        try:
+            photo_file = await target_photo.get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            image_stream = io.BytesIO(photo_bytes)
+            match = matcher.find_match_by_image(image_stream)
+        except Exception as e:
+            logger.debug(f"Visual match attempt error: {e}")
 
-        # Cache the result
-        if len(RECENT_MATCH_CACHE) >= MAX_CACHE_SIZE:
-            RECENT_MATCH_CACHE.popitem(last=False)
-        RECENT_MATCH_CACHE[unique_id] = match
+    # Store in LRU cache
+    if len(RECENT_MATCH_CACHE) >= MAX_CACHE_SIZE:
+        RECENT_MATCH_CACHE.popitem(last=False)
+    RECENT_MATCH_CACHE[unique_id] = match
 
-        if match:
-            response_text = format_character_card(match)
-            await msg.reply_text(
-                response_text,
-                parse_mode=constants.ParseMode.MARKDOWN,
-                reply_to_message_id=msg.message_id
-            )
-        else:
-            await msg.reply_text(
-                "❌ **Character not found in database!**",
-                parse_mode=constants.ParseMode.MARKDOWN,
-                reply_to_message_id=msg.message_id
-            )
-
-    except Exception as e:
-        logger.error(f"Error matching photo: {e}", exc_info=True)
+    if match:
+        response_text = format_character_card(match)
+        await msg.reply_text(
+            response_text,
+            parse_mode=constants.ParseMode.MARKDOWN,
+            reply_to_message_id=msg.message_id
+        )
+    else:
+        await msg.reply_text(
+            "❌ **Character not found in database!**\n\n"
+            "*(Try using `/search <name>` if you know part of their name)*",
+            parse_mode=constants.ParseMode.MARKDOWN,
+            reply_to_message_id=msg.message_id
+        )
 
 
 def main():
@@ -210,7 +353,7 @@ def main():
         print("=" * 60 + "\n")
         sys.exit(1)
 
-    print("🚀 Starting Ultra-Fast Telegram Waifu Identifier Bot...")
+    print("🚀 Starting Telegram Waifu Identifier Bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Commands
@@ -218,15 +361,26 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("anime", anime_command))
+    app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("random", random_command))
+    app.add_handler(CommandHandler("reload", reload_command))
+
+    # Trigger aliases for group photo replies
     app.add_handler(CommandHandler("find", handle_photo_message))
     app.add_handler(CommandHandler("who", handle_photo_message))
     app.add_handler(CommandHandler("guess", handle_photo_message))
+    app.add_handler(CommandHandler("claim", handle_photo_message))
 
-    # Photos (DMs & Group replies)
+    # Photos & Forwarded Media
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
 
-    print(f"⚡ Bot is ONLINE! Active visual index: {len(matcher.index):,} characters.")
-    print("🤖 Listening for messages with < 5ms response time...")
+    # Inline Query Handler
+    app.add_handler(InlineQueryHandler(inline_query_handler))
+
+    total_loaded = len(matcher.all_characters)
+    print(f"⚡ Bot is ONLINE! Total loaded characters: {total_loaded:,}")
+    print("🤖 Listening for messages, photos, and inline queries...")
     app.run_polling()
 
 
