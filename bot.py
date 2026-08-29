@@ -346,10 +346,21 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-    # 2. Check O(1) Cloud Unique ID Match (0.0001 ms)
-    match = matcher.find_match_by_unique_id(unique_id)
+    match = None
 
-    # 3. Fallback to Visual Perceptual Hash Match (< 1 ms)
+    # 2. Check Forward Origin (Direct forward from database channel)
+    if msg.forward_from_chat and msg.forward_from_message_id:
+        match = matcher.find_match_by_message_id(msg.forward_from_chat.id, msg.forward_from_message_id)
+    elif hasattr(msg, 'forward_origin') and msg.forward_origin:
+        origin = msg.forward_origin
+        if hasattr(origin, 'chat') and hasattr(origin, 'message_id'):
+            match = matcher.find_match_by_message_id(origin.chat.id, origin.message_id)
+
+    # 3. Check O(1) Cloud Unique ID Match
+    if not match:
+        match = matcher.find_match_by_unique_id(unique_id)
+
+    # 4. Check Visual Perceptual Hash Match (< 1 ms)
     if not match:
         try:
             photo_file = await target_photo.get_file()
@@ -358,6 +369,18 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             match = matcher.find_match_by_image(image_stream)
         except Exception as e:
             logger.debug(f"Visual match attempt error: {e}")
+
+    # 5. Check if caption has character name or parsed metadata
+    if not match:
+        caption_text = msg.caption or (msg.reply_to_message.caption if msg.reply_to_message else None)
+        if caption_text:
+            parsed = WaifuParser.parse(caption_text)
+            if parsed.get("name") and parsed["name"] != "Unknown":
+                candidates = matcher.search_by_name(parsed["name"], limit=1)
+                if candidates:
+                    match = dict(candidates[0])
+                    match["confidence"] = 99.0
+                    match["match_type"] = "Caption Text Match"
 
     # Store in LRU cache
     if len(RECENT_MATCH_CACHE) >= MAX_CACHE_SIZE:

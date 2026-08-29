@@ -57,6 +57,8 @@ class WaifuMatcher:
         self.github_url = github_url
         self.db_path = db_path
         self.db_manager = DatabaseManager(db_path)
+        # Map of (channel_id, telegram_msg_id) -> character data for instant forward lookups
+        self.msg_id_map: Dict[Tuple[int, int], Dict[str, Any]] = {}
         # Unique ID hashmap for instant O(1) Telegram forward matching
         self.unique_id_map: Dict[str, Dict[str, Any]] = {}
         # Array of (phash_int, dhash_int, character_data_dict) for visual recognition
@@ -140,11 +142,18 @@ class WaifuMatcher:
 
                 v_loaded = []
                 u_map = {}
+                m_map = {}
                 all_chars = []
 
                 for row in rows:
                     item = dict(row)
                     all_chars.append(item)
+
+                    # Message ID Map
+                    cid = item.get("channel_id")
+                    mid = item.get("telegram_msg_id")
+                    if cid and mid:
+                        m_map[(cid, mid)] = item
 
                     uid = item.get("telegram_file_unique_id")
                     if uid:
@@ -162,6 +171,7 @@ class WaifuMatcher:
 
                 self.visual_index = v_loaded
                 self.unique_id_map = u_map
+                self.msg_id_map = m_map
                 self.all_characters = all_chars
                 logger.info(
                     f"⚡ Loaded {len(self.all_characters):,} characters directly from local SQLite database! "
@@ -183,6 +193,20 @@ class WaifuMatcher:
             return
 
         logger.warning("No character records found in local database or GitHub cloud.")
+
+    def find_match_by_message_id(self, channel_id: int, msg_id: int) -> Optional[Dict[str, Any]]:
+        """Instant O(1) match when user forwards a post directly from a database channel."""
+        if not channel_id or not msg_id:
+            return None
+        # Check direct and -100 prefixed IDs
+        clean_cid = int(str(channel_id).replace("-100", ""))
+        match = self.msg_id_map.get((clean_cid, msg_id)) or self.msg_id_map.get((channel_id, msg_id))
+        if match:
+            res = dict(match)
+            res["confidence"] = 100.0
+            res["match_type"] = "Channel Message ID Match"
+            return res
+        return None
 
     def find_match_by_unique_id(self, unique_id: str) -> Optional[Dict[str, Any]]:
         """Instant O(1) matching for forwarded images using Telegram file_unique_id."""
