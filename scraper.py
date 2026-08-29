@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import asyncio
@@ -22,6 +23,7 @@ from config import (
 )
 from database import DatabaseManager
 from parser import WaifuParser
+from matcher import compute_image_hashes
 
 # Logging setup
 logging.basicConfig(
@@ -34,11 +36,12 @@ logger = logging.getLogger("WaifuScraper")
 
 
 class TelegramWaifuScraper:
-    """Ultra-fast pure text & metadata scraper (0 MB image downloads)."""
+    """In-memory visual hashing scraper (computes visual hashes in RAM, 0 MB disk storage used)."""
 
     def __init__(self):
         self.db = DatabaseManager(DB_PATH)
         self.client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+        self.semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
         self.db_lock = asyncio.Lock()
 
     async def connect(self):
@@ -47,7 +50,8 @@ class TelegramWaifuScraper:
         await self.client.start(phone=PHONE if PHONE else None)
         me = await self.client.get_me()
         logger.info(f"Successfully logged in as: {me.first_name} (@{me.username or 'No Username'}) [ID: {me.id}]")
-        logger.info(f"⚡ Instant Text-Only Mode Active: Zero media downloads, maximum scraping speed!")
+        logger.info(f"⚡ In-Memory Visual Streaming Active: Computing 64-bit visual hashes in RAM (0 MB disk space used)")
+        logger.info(f"Parallel streams: {CONCURRENT_DOWNLOADS} active workers")
 
     async def get_database_folder_channels(self, target_folder_name: str = FOLDER_NAME) -> List[types.TypeInputPeer]:
         """Finds the Telegram chat folder and extracts all channels inside it."""
@@ -99,7 +103,7 @@ class TelegramWaifuScraper:
         return channels
 
     async def _process_message(self, message: types.Message, channel_id: int, channel_title: str) -> bool:
-        """Extracts character metadata and cloud Telegram file IDs (0 bytes downloaded)."""
+        """Extracts character metadata and computes in-memory visual hashes in RAM."""
         msg_id = message.id
         raw_text = getattr(message, 'raw_text', '') or getattr(message, 'text', '') or getattr(message, 'message', '') or ""
 
@@ -123,12 +127,35 @@ class TelegramWaifuScraper:
         event = parsed["event"]
         extra_info = parsed["extra_info"]
 
-        # Extract Telegram Cloud File IDs from message header without downloading any media
+        image_phash = None
+        image_dhash = None
         telegram_file_unique_id = None
+
         if has_photo:
             telegram_file_unique_id = str(getattr(message.photo, 'id', ''))
         elif has_image_doc:
             telegram_file_unique_id = str(getattr(doc, 'id', ''))
+
+        # In-Memory Visual Hashing (Streams thumbnail directly in RAM, 0 MB disk storage used)
+        if has_photo or has_image_doc:
+            async with self.semaphore:
+                retries = 2
+                while retries > 0:
+                    try:
+                        mem_buffer = io.BytesIO()
+                        # Download thumbnail into RAM
+                        await self.client.download_media(message, file=mem_buffer, thumb=-1)
+                        mem_buffer.seek(0)
+                        hashes = compute_image_hashes(mem_buffer)
+                        if hashes:
+                            image_phash, image_dhash, _, _ = hashes
+                        break
+                    except errors.FloodWaitError as fwe:
+                        logger.warning(f"FloodWait on msg {msg_id}: Waiting {fwe.seconds + 1}s...")
+                        await asyncio.sleep(fwe.seconds + 1)
+                    except Exception:
+                        retries -= 1
+                        await asyncio.sleep(0.2)
 
         # Thread-safe database insert
         async with self.db_lock:
@@ -143,15 +170,15 @@ class TelegramWaifuScraper:
                 event=event,
                 telegram_file_id=None,
                 telegram_file_unique_id=telegram_file_unique_id,
-                image_phash=None,
-                image_dhash=None,
+                image_phash=image_phash,
+                image_dhash=image_dhash,
                 extra_info=extra_info,
                 raw_text=raw_text
             )
         return True
 
     async def scrape_channel(self, channel_entity):
-        """Scrapes channel messages at lightning speed."""
+        """Scrapes channel messages and visual hashes in parallel batches."""
         channel_id = channel_entity.id
         channel_title = getattr(channel_entity, 'title', f"channel_{channel_id}")
         channel_username = getattr(channel_entity, 'username', None)
@@ -163,7 +190,7 @@ class TelegramWaifuScraper:
         count = 0
         skipped = 0
         batch_tasks = []
-        BATCH_SIZE = 50
+        BATCH_SIZE = CONCURRENT_DOWNLOADS * 3
 
         async for message in self.client.iter_messages(channel_entity, reverse=True):
             if not message or not isinstance(message, types.Message):
@@ -171,7 +198,7 @@ class TelegramWaifuScraper:
 
             msg_id = message.id
 
-            # Check if already processed
+            # Check if already processed with a visual hash
             if self.db.is_message_processed(channel_id, msg_id):
                 skipped += 1
                 continue
@@ -185,7 +212,7 @@ class TelegramWaifuScraper:
                 count += new_saved
                 batch_tasks = []
                 self.db.update_channel_progress(channel_id, channel_title, channel_username, msg_id)
-                logger.info(f"[{channel_title}] Scraped {count} waifus | Skipped {skipped} already in DB...")
+                logger.info(f"[{channel_title}] Scraped & Visually Hashed {count} waifus | Skipped {skipped}...")
 
         if batch_tasks:
             results = await asyncio.gather(*batch_tasks, return_exceptions=True)
@@ -194,7 +221,7 @@ class TelegramWaifuScraper:
             batch_tasks = []
             self.db.update_channel_progress(channel_id, channel_title, channel_username, msg_id)
 
-        logger.info(f"✅ Finished '{channel_title}': {count} new waifus scraped, {skipped} skipped.")
+        logger.info(f"✅ Finished '{channel_title}': {count} new waifus hashed, {skipped} skipped.")
 
     async def run(self):
         """Main execution loop."""
@@ -216,7 +243,7 @@ class TelegramWaifuScraper:
                 logger.error(f"Error processing channel {getattr(channel, 'title', channel.id)}: {e}", exc_info=True)
 
         logger.info("\n" + "=" * 60)
-        logger.info("SCRAPING COMPLETE! EXPORTING METADATA...")
+        logger.info("SCRAPING COMPLETE! EXPORTING DATABASE WITH VISUAL HASHES...")
         logger.info("=" * 60)
 
         json_count = self.db.export_to_json(EXPORT_JSON_PATH)
@@ -226,6 +253,7 @@ class TelegramWaifuScraper:
         logger.info(f"Exported {json_count} characters to: {EXPORT_JSON_PATH}")
         logger.info(f"Exported {csv_count} characters to: {EXPORT_CSV_PATH}")
         logger.info(f"Total Characters in DB: {stats['total_characters']}")
+        logger.info(f"Total Visually Hashed Characters: {stats['hashed_characters']}")
         logger.info(f"Unique Anime Franchises: {stats['unique_animes']}")
 
 
