@@ -27,7 +27,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, DB_PATH
 from database import DatabaseManager
 from matcher import WaifuMatcher
-from parser import clean_text
+from parser import clean_text, sanitize_character_name
 
 # Logging configuration
 logging.basicConfig(
@@ -99,8 +99,9 @@ def format_character_card(char: dict, command: str = "grab") -> str:
     🔸 Full : `/command Character Name`
     """
     raw_name = char.get("name") or "Unknown"
-    clean_char_name = clean_text(raw_name).strip()
+    clean_char_name = sanitize_character_name(raw_name)
     hint_name = clean_char_name.lower()
+    command = command.lstrip("/").strip() or "grab"
 
     return (
         f"NAME : `{clean_char_name}`\n"

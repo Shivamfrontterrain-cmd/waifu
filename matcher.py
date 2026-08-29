@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from config import DB_PATH, GITHUB_DATA_URL
 from database import DatabaseManager
+from parser import sanitize_character_name, strip_field_prefix
 
 logger = logging.getLogger("WaifuMatcher")
 
@@ -85,9 +86,13 @@ class WaifuMatcher:
                     all_chars = []
 
                     for item in characters:
-                        name = item.get("name")
-                        if not name or name == "Unknown":
+                        raw_name = item.get("name")
+                        if not raw_name or raw_name == "Unknown":
                             continue
+
+                        item["name"] = sanitize_character_name(raw_name)
+                        if item.get("anime"):
+                            item["anime"] = strip_field_prefix(item["anime"], ["anime", "source", "series", "from"])
 
                         all_chars.append(item)
 
@@ -129,7 +134,7 @@ class WaifuMatcher:
             with self.db_manager.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, name, anime, rarity, character_id, event,
+                    SELECT id, channel_id, telegram_msg_id, name, anime, rarity, character_id, event,
                            telegram_file_id, telegram_file_unique_id,
                            channel_title, image_phash, image_dhash
                     FROM characters
@@ -147,6 +152,11 @@ class WaifuMatcher:
 
                 for row in rows:
                     item = dict(row)
+                    raw_name = item.get("name")
+                    item["name"] = sanitize_character_name(raw_name)
+                    if item.get("anime"):
+                        item["anime"] = strip_field_prefix(item["anime"], ["anime", "source", "series", "from"])
+
                     all_chars.append(item)
 
                     # Message ID Map

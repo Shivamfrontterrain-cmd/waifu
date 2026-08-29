@@ -34,9 +34,42 @@ def strip_field_prefix(val: str, field_names: list) -> str:
     cleaned = re.sub(r'^[^\w\s\(\)\[\]]+', '', cleaned).strip()
     # Remove field keywords
     for fn in field_names:
-        pat = rf'^(?:{fn})\s*[:：\-—=]\s*'
+        pat = rf'^(?:{fn})\s*[:：\-—=.]\s*'
         cleaned = re.sub(pat, '', cleaned, flags=re.IGNORECASE).strip()
-    return cleaned.strip(' -:—=')
+    return cleaned.strip(' -:—=.')
+
+
+def sanitize_character_name(val: str) -> str:
+    """
+    Cleans raw character names:
+    - Strips prefixes like 'Name:', 'NAME:', '👤 Name:', 'Character:', 'Waifu:', etc.
+    - Strips markdown formatting (*, _, `, ~)
+    - Normalizes mathematical/script unicode fonts to ASCII
+    - Strips leading/trailing emojis, brackets, quotes, colons, dashes
+    """
+    if not val:
+        return "Unknown"
+    
+    cleaned = normalize_unicode_fonts(val)
+    cleaned = re.sub(r'[*_`~]+', '', cleaned)
+    cleaned = html.unescape(cleaned)
+    cleaned = cleaned.replace('\u200b', '').replace('\u200e', '').replace('\u200f', '').replace('\ufeff', '')
+    
+    # Strip leading emojis, symbols, brackets
+    cleaned = re.sub(r'^[^\w\s\(\)\[\]]+', '', cleaned).strip()
+    
+    # Repeatedly strip known prefixes in case of stacked prefixes (e.g. "👤 Name: Name: Sukuna")
+    for _ in range(3):
+        cleaned = re.sub(
+            r'^(?:name|character|waifu|husbando|char|hero|heroine|card|drop)\s*[:：\-—=.]\s*',
+            '',
+            cleaned,
+            flags=re.IGNORECASE
+        ).strip()
+        cleaned = re.sub(r'^[^\w\s\(\)]+', '', cleaned).strip()
+
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' "\'—:-=.')
+    return cleaned or "Unknown"
 
 
 def sanitize_filename(name: str, max_length: int = 60) -> str:
