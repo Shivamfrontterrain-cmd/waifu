@@ -349,12 +349,26 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     match = None
 
     # 2. Check Forward Origin (Direct forward from database channel)
-    if msg.forward_from_chat and msg.forward_from_message_id:
-        match = matcher.find_match_by_message_id(msg.forward_from_chat.id, msg.forward_from_message_id)
-    elif hasattr(msg, 'forward_origin') and msg.forward_origin:
+    fwd_chat_id = None
+    fwd_msg_id = None
+
+    # Modern Bot API (forward_origin)
+    if hasattr(msg, 'forward_origin') and msg.forward_origin:
         origin = msg.forward_origin
-        if hasattr(origin, 'chat') and hasattr(origin, 'message_id'):
-            match = matcher.find_match_by_message_id(origin.chat.id, origin.message_id)
+        if hasattr(origin, 'chat') and hasattr(origin.chat, 'id'):
+            fwd_chat_id = origin.chat.id
+        if hasattr(origin, 'message_id'):
+            fwd_msg_id = origin.message_id
+
+    # Fallback for legacy forward attributes
+    if not fwd_chat_id:
+        fwd_chat = getattr(msg, 'forward_from_chat', None)
+        if fwd_chat:
+            fwd_chat_id = getattr(fwd_chat, 'id', None)
+        fwd_msg_id = getattr(msg, 'forward_from_message_id', None)
+
+    if fwd_chat_id and fwd_msg_id:
+        match = matcher.find_match_by_message_id(fwd_chat_id, fwd_msg_id)
 
     # 3. Check O(1) Cloud Unique ID Match
     if not match:
@@ -403,6 +417,11 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Logs unexpected errors without crashing the bot."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+
 def main():
     if not BOT_TOKEN:
         print("\n" + "=" * 60)
@@ -415,6 +434,9 @@ def main():
 
     print("🚀 Starting Telegram Waifu Identifier Bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Global Error Handler
+    app.add_error_handler(error_handler)
 
     # Commands
     app.add_handler(CommandHandler("start", start_command))
