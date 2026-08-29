@@ -161,9 +161,12 @@ class DatabaseManager:
             }
 
     def export_to_json(self, output_path: Path = EXPORT_JSON_PATH) -> int:
-        """Exports all characters to a structured JSON file."""
+        """Exports all characters to a structured JSON file with GitHub image URLs and hashes."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        from config import GITHUB_RAW_IMAGE_BASE
+        from parser import sanitize_filename
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM characters ORDER BY id ASC")
@@ -180,6 +183,14 @@ class DatabaseManager:
                 else:
                     item["extra_info"] = {}
                 del item["extra_info_json"]
+
+                # Generate direct GitHub CDN image URL if image filename exists
+                if item.get("image_filename") and item.get("channel_title"):
+                    safe_channel = sanitize_filename(item["channel_title"])
+                    item["image_url"] = f"{GITHUB_RAW_IMAGE_BASE}/{safe_channel}/{item['image_filename']}"
+                else:
+                    item["image_url"] = None
+
                 data.append(item)
 
             with open(output_path, "w", encoding="utf-8") as f:

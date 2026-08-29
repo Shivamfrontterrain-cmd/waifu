@@ -14,6 +14,15 @@ PHONE = os.getenv("TG_PHONE", "").strip()
 SESSION_NAME = os.getenv("SESSION_NAME", "waifu_session").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+# GitHub Cloud Database & CDN settings
+GITHUB_REPO = os.getenv("GITHUB_REPO", "Shivamfrontterrain-cmd/waifu").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
+GITHUB_DATA_URL = os.getenv(
+    "GITHUB_DATA_URL",
+    f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/database/waifus.json"
+).strip()
+GITHUB_RAW_IMAGE_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/downloads/images"
+
 # Target Folder
 FOLDER_NAME = os.getenv("FOLDER_NAME", "databases").strip()
 

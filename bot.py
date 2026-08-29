@@ -126,6 +126,7 @@ def format_character_card(char: dict) -> str:
     char_id = char.get("character_id")
     event = char.get("event")
     confidence = char.get("confidence", 100.0)
+    image_url = char.get("image_url")
 
     card = [
         "🎯 **Character Identified!**\n",
@@ -138,6 +139,8 @@ def format_character_card(char: dict) -> str:
         card.append(f"🆔 **ID:** `{char_id}`")
     if event:
         card.append(f"🎪 **Event:** {event}")
+    if image_url:
+        card.append(f"🖼️ **Cloud Artwork:** [Open Image]({image_url})")
 
     card.append(f"\n📊 **Match Accuracy:** `{confidence}%`")
     return "\n".join(card)

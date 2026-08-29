@@ -1,6 +1,7 @@
-import sqlite3
 import io
+import json
 import logging
+import urllib.request
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -8,7 +9,7 @@ from PIL import Image
 import imagehash
 from tqdm import tqdm
 
-from config import DB_PATH, IMAGE_DIR
+from config import DB_PATH, GITHUB_DATA_URL
 from database import DatabaseManager
 
 logger = logging.getLogger("WaifuMatcher")
@@ -44,11 +45,12 @@ def compute_image_hashes(img_input: Any) -> Optional[Tuple[str, str]]:
 
 
 class WaifuMatcher:
-    """High-speed visual matcher that identifies anime characters by image."""
+    """High-speed visual matcher that loads database directly from GitHub Cloud API."""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_manager = DatabaseManager(db_path)
+    def __init__(self, db_path: Path = DB_PATH, github_url: str = GITHUB_DATA_URL):
+        self.github_url = github_url
         self.db_path = db_path
+        self.db_manager = DatabaseManager(db_path)
         self._ensure_hash_columns()
         # In-memory index: list of (phash_obj, dhash_obj, character_data_dict)
         self.index: List[Tuple[Any, Any, Dict[str, Any]]] = []
@@ -56,22 +58,92 @@ class WaifuMatcher:
 
     def _ensure_hash_columns(self):
         """Adds image_phash and image_dhash columns to characters table if missing."""
-        with self.db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(characters)")
-            columns = [row["name"] for row in cursor.fetchall()]
+        try:
+            with self.db_manager.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(characters)")
+                columns = [row["name"] for row in cursor.fetchall()]
 
-            if "image_phash" not in columns:
-                cursor.execute("ALTER TABLE characters ADD COLUMN image_phash TEXT")
-            if "image_dhash" not in columns:
-                cursor.execute("ALTER TABLE characters ADD COLUMN image_dhash TEXT")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_char_phash ON characters(image_phash)")
-            conn.commit()
+                if "image_phash" not in columns:
+                    cursor.execute("ALTER TABLE characters ADD COLUMN image_phash TEXT")
+                if "image_dhash" not in columns:
+                    cursor.execute("ALTER TABLE characters ADD COLUMN image_dhash TEXT")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_char_phash ON characters(image_phash)")
+                conn.commit()
+        except Exception:
+            pass
+
+    def load_index_from_github(self) -> bool:
+        """Loads all character data and hashes directly from GitHub raw JSON API."""
+        try:
+            logger.info(f"Connecting to GitHub Cloud Database: {self.github_url}...")
+            req = urllib.request.Request(
+                self.github_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WaifuBot/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    raw_data = response.read().decode("utf-8")
+                    characters = json.loads(raw_data)
+
+                    loaded = []
+                    for item in characters:
+                        if not item.get("name") or item.get("name") == "Unknown":
+                            continue
+                        phash_val = item.get("image_phash")
+                        dhash_val = item.get("image_dhash")
+                        phash_obj = imagehash.hex_to_hash(phash_val) if phash_val else None
+                        dhash_obj = imagehash.hex_to_hash(dhash_val) if dhash_val else None
+
+                        if phash_obj:
+                            loaded.append((phash_obj, dhash_obj, item))
+
+                    if loaded:
+                        self.index = loaded
+                        logger.info(f"✅ Loaded {len(self.index):,} characters DIRECTLY from GitHub Cloud Database!")
+                        return True
+        except Exception as e:
+            logger.warning(f"Could not load directly from GitHub ({e}). Checking local database...")
+        return False
+
+    def load_index(self):
+        """Loads index: prioritizes GitHub Cloud Database, with local database fallback."""
+        # 1. Try loading directly from GitHub cloud
+        if self.load_index_from_github():
+            return
+
+        # 2. Fallback to local SQLite database if available
+        try:
+            with self.db_manager.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, name, anime, rarity, character_id, event,
+                           image_filename, image_path, channel_title,
+                           image_phash, image_dhash
+                    FROM characters
+                    WHERE image_phash IS NOT NULL AND image_phash != '' AND name != 'Unknown'
+                """)
+                rows = cursor.fetchall()
+
+                loaded = []
+                for row in rows:
+                    item = dict(row)
+                    try:
+                        phash_obj = imagehash.hex_to_hash(item["image_phash"])
+                        dhash_obj = imagehash.hex_to_hash(item["image_dhash"]) if item.get("image_dhash") else None
+                        loaded.append((phash_obj, dhash_obj, item))
+                    except Exception:
+                        continue
+
+                self.index = loaded
+                logger.info(f"Loaded {len(self.index)} characters from local fallback database.")
+        except Exception as e:
+            logger.error(f"Error loading local index: {e}")
 
     def build_hash_index(self, force_recompute: bool = False) -> int:
         """
         Scans all downloaded images in the database, computes hashes,
-        and saves them into SQLite for instant future lookups.
+        and saves them into SQLite and JSON for instant future lookups.
         """
         with self.db_manager.get_connection() as conn:
             cursor = conn.cursor()
@@ -109,38 +181,14 @@ class WaifuMatcher:
                 conn.commit()
                 logger.info(f"Successfully indexed {len(updates)} character images!")
 
+        # Export updated JSON with hashes
+        self.db_manager.export_to_json()
         self.load_index()
         return len(updates)
 
-    def load_index(self):
-        """Loads all hashed characters into an ultra-fast in-memory index."""
-        with self.db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, name, anime, rarity, character_id, event,
-                       image_filename, image_path, channel_title,
-                       image_phash, image_dhash
-                FROM characters
-                WHERE image_phash IS NOT NULL AND image_phash != '' AND name != 'Unknown'
-            """)
-            rows = cursor.fetchall()
-
-            loaded = []
-            for row in rows:
-                item = dict(row)
-                try:
-                    phash_obj = imagehash.hex_to_hash(item["image_phash"])
-                    dhash_obj = imagehash.hex_to_hash(item["image_dhash"]) if item.get("image_dhash") else None
-                    loaded.append((phash_obj, dhash_obj, item))
-                except Exception:
-                    continue
-
-            self.index = loaded
-            logger.info(f"Loaded {len(self.index)} hashed characters into active memory index.")
-
     def find_match(self, query_img: Any, max_distance: int = 14) -> Optional[Dict[str, Any]]:
         """
-        Compares an incoming image against the database in milliseconds.
+        Compares an incoming image against the in-memory database in milliseconds.
         Returns the closest matching character metadata + confidence score.
         """
         if not self.index:
@@ -160,7 +208,6 @@ class WaifuMatcher:
         min_distance = 999
 
         for phash_obj, dhash_obj, char_data in self.index:
-            # Hamming distance calculation (0 = 100% identical, <= 10 = extremely high match)
             dist_p = query_phash - phash_obj
             dist_d = (query_dhash - dhash_obj) if (dhash_obj and query_dhash) else dist_p
             combined_dist = (dist_p * 0.6) + (dist_d * 0.4)
@@ -168,12 +215,10 @@ class WaifuMatcher:
             if combined_dist < min_distance:
                 min_distance = combined_dist
                 best_match = char_data
-                # Early return on exact match
                 if min_distance == 0:
                     break
 
         if best_match and min_distance <= max_distance:
-            # Calculate match percentage (64-bit hash)
             confidence = max(0.0, min(100.0, (1.0 - (min_distance / 64.0)) * 100.0))
             result = dict(best_match)
             result["confidence"] = round(confidence, 1)
@@ -183,18 +228,18 @@ class WaifuMatcher:
         return None
 
     def search_by_name(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Searches characters by text name or anime title."""
+        """Searches characters by text query directly in memory."""
         if not query or not query.strip():
             return []
-        term = f"%{query.strip()}%"
-        with self.db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, name, anime, rarity, character_id, event,
-                       image_filename, image_path, channel_title
-                FROM characters
-                WHERE (name LIKE ? OR anime LIKE ?) AND name != 'Unknown'
-                ORDER BY CASE WHEN name LIKE ? THEN 0 ELSE 1 END, id ASC
-                LIMIT ?
-            """, (term, term, term, limit))
-            return [dict(r) for r in cursor.fetchall()]
+        q = query.strip().lower()
+
+        results = []
+        for _, _, char in self.index:
+            name = char.get("name", "").lower()
+            anime = char.get("anime", "").lower()
+            if q in name or q in anime:
+                results.append(char)
+                if len(results) >= limit:
+                    break
+        return results
+
