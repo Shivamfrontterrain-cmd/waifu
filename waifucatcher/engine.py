@@ -26,13 +26,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from telethon import TelegramClient
 from matcher import WaifuMatcher, compute_image_hashes
-from parser import sanitize_character_name, clean_text, strip_field_prefix
+from parser import sanitize_character_name, clean_text, strip_field_prefix, WaifuParser, NON_CHARACTER_PHRASES
 
 logger = logging.getLogger("CatcherEngine")
 
 
 class CloudImageStreamer:
-    """Streams character images from Telegram Cloud channels into RAM in 0ms (0 local image files stored on disk)."""
+    """Streams crystal-clear full HD character images from Telegram Cloud channels into RAM (0 local image files stored on disk)."""
 
     def __init__(self):
         self.client: Optional[TelegramClient] = None
@@ -64,7 +64,7 @@ class CloudImageStreamer:
                 logger.debug(f"CloudImageStreamer connect note: {e}")
 
     async def get_image_bytes(self, channel_id: int, msg_id: int) -> Optional[bytes]:
-        """Fetches character thumbnail/photo directly into RAM (0 MB disk storage used)."""
+        """Fetches crystal-clear HD character artwork directly into RAM (0 MB disk storage used)."""
         cache_key = (channel_id, msg_id)
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -81,22 +81,22 @@ class CloudImageStreamer:
                     if not msg or not (getattr(msg, "photo", None) or getattr(msg, "document", None)):
                         return None
                     buf = io.BytesIO()
-                    # thumb=0 extracts embedded PhotoStrippedSize in 0.001ms directly from message bytes
-                    await self.client.download_media(msg, file=buf, thumb=0)
+                    # Download crystal-clear full HD photo
+                    await self.client.download_media(msg, file=buf)
                     data = buf.getvalue()
                     if not data:
-                        await self.client.download_media(msg, file=buf, thumb=1)
+                        await self.client.download_media(msg, file=buf, thumb=-1)
                         data = buf.getvalue()
                     return data if data else None
 
-                data = await asyncio.wait_for(_fetch(), timeout=2.0)
+                data = await asyncio.wait_for(_fetch(), timeout=4.0)
                 if data:
                     if len(self._cache) > 2000:
                         self._cache.pop(next(iter(self._cache)))
                     self._cache[cache_key] = data
                 return data
             except Exception as e:
-                logger.debug(f"Fast cloud streamer note ({channel_id}, {msg_id}): {e}")
+                logger.debug(f"Cloud image stream note ({channel_id}, {msg_id}): {e}")
                 return None
 
 
@@ -119,12 +119,33 @@ class WaifuGameEngine:
 
     def get_character(self, character_id: int) -> Optional[Dict[str, Any]]:
         """Looks up a character by their numeric database ID."""
-        return self.matcher.get_character_by_id(character_id)
+        char = self.matcher.get_character_by_id(character_id)
+        if char and (char.get("name", "").lower() in NON_CHARACTER_PHRASES or char.get("name") == "Unknown"):
+            if char.get("raw_text"):
+                parsed = WaifuParser.parse(char["raw_text"])
+                if parsed["name"] and parsed["name"].lower() not in NON_CHARACTER_PHRASES and parsed["name"] != "Unknown":
+                    char["name"] = parsed["name"]
+                    if parsed["anime"] != "Unknown":
+                        char["anime"] = parsed["anime"]
+        return char
 
     def get_random_spawn(self) -> Optional[Dict[str, Any]]:
-        """Selects a random character for wild spawning in group chats."""
+        """Selects a clean, valid random character for wild spawning in group chats."""
         if not self.all_characters:
             return None
+        for _ in range(30):
+            char = random.choice(self.all_characters)
+            name = char.get("name") or ""
+            if name.lower() in NON_CHARACTER_PHRASES or name == "Unknown" or len(name) < 2:
+                if char.get("raw_text"):
+                    parsed = WaifuParser.parse(char["raw_text"])
+                    if parsed["name"] and parsed["name"].lower() not in NON_CHARACTER_PHRASES and parsed["name"] != "Unknown":
+                        char["name"] = parsed["name"]
+                        if parsed["anime"] != "Unknown":
+                            char["anime"] = parsed["anime"]
+                        return char
+                continue
+            return char
         return random.choice(self.all_characters)
 
     def get_rarity_info(self, raw_rarity: Optional[str]) -> Tuple[str, str, int]:

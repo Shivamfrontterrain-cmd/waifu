@@ -83,13 +83,20 @@ def sanitize_filename(name: str, max_length: int = 60) -> str:
     return sanitized[:max_length]
 
 
+NON_CHARACTER_PHRASES = {
+    "owo! add new waifu!", "add new waifu", "add new waifu!", "new waifu added", "waifu added",
+    "uploaded (/li)", "photo updated", "character added", "grab your waifu", "join channel",
+    "click here", "unknown", "n/a", "none", "bot restart", "uploaded", "photo update", "image updated"
+}
+
+
 class WaifuParser:
     """Smart parser for extracting waifu/character metadata from message captions/text."""
 
     # Common Key Regex Patterns (Applied after NFKD normalization)
     NAME_PATTERNS = [
         r'(?:name|character|waifu|husbando|char|hero|heroine)\s*[:：\-—=]\s*(.+)',
-        r'(?:🌸|👤|💮|🎀|💖|✨|🪄|👧|👩)\s*(?:name|character)?\s*[:：\-—]?\s*(.+)',
+        r'(?:🌸|👤|💮|🎀|💖|✨|🪄|👧|👩|📛)\s*(?:name|character)?\s*[:：\-—]?\s*(.+)',
     ]
 
     ANIME_PATTERNS = [
@@ -140,7 +147,19 @@ class WaifuParser:
         event = None
         extra_info: Dict[str, str] = {}
 
-        # 1. Line-by-line regex key matching
+        # 1. Look for Number: Name lines (e.g. "3677: Firefly [🐰]" or "5530: Yelan [🔞]")
+        for line in lines:
+            m = re.search(r'^(?:#|id\s*)?(\d{1,7})\s*[:：\-—.]\s*(.+)$', line, re.IGNORECASE)
+            if m:
+                cid = m.group(1).strip()
+                cname = re.sub(r'\[.*?\]|\(.*?\)', '', m.group(2)).strip()
+                cname = sanitize_character_name(cname)
+                if cname and cname.lower() not in NON_CHARACTER_PHRASES:
+                    character_id = cid
+                    name = cname
+                    break
+
+        # 2. Line-by-line regex key matching
         for line in lines:
             cleaned_line = clean_text(line)
 
@@ -157,8 +176,11 @@ class WaifuParser:
                 for pat in cls.NAME_PATTERNS:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
-                        name = strip_field_prefix(m.group(1), ["name", "character", "waifu", "char"])
-                        break
+                        cand = strip_field_prefix(m.group(1), ["name", "character", "waifu", "char"])
+                        cand = sanitize_character_name(cand)
+                        if cand and cand.lower() not in NON_CHARACTER_PHRASES:
+                            name = cand
+                            break
 
             # Check Anime
             if not anime:
@@ -166,6 +188,7 @@ class WaifuParser:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
                         anime = strip_field_prefix(m.group(1), ["anime", "source", "from", "series", "origin"])
+                        anime = sanitize_character_name(anime)
                         break
 
             # Check Rarity
@@ -173,7 +196,9 @@ class WaifuParser:
                 for pat in cls.RARITY_PATTERNS:
                     m = re.search(pat, line, re.IGNORECASE)
                     if m:
-                        rarity = strip_field_prefix(m.group(1), ["rarity", "tier", "rank", "stars", "rating"])
+                        val = m.group(1).strip().rstrip(')').strip()
+                        rarity = strip_field_prefix(val, ["rarity", "tier", "rank", "stars", "rating"])
+                        rarity = sanitize_character_name(rarity)
                         break
 
             # Check Event
@@ -184,7 +209,7 @@ class WaifuParser:
                         event = strip_field_prefix(m.group(1), ["event", "edition", "version", "type", "theme"])
                         break
 
-        # 2. Key-Value Fallback (Generic separator detection)
+        # 3. Key-Value Fallback
         if not name or not anime:
             for line in lines:
                 if any(delim in line for delim in [':', '：', '-', '—', '=']):
@@ -194,35 +219,47 @@ class WaifuParser:
                         v = clean_text(parts[1])
                         if not v:
                             continue
-                        if not name and any(x in k for x in ['name', 'char', 'waifu', '👤', '🌸']):
-                            name = strip_field_prefix(v, ["name", "character", "waifu"])
+                        if not name and any(x in k for x in ['name', 'char', 'waifu', '👤', '🌸', '📛']):
+                            cand = strip_field_prefix(v, ["name", "character", "waifu"])
+                            cand = sanitize_character_name(cand)
+                            if cand and cand.lower() not in NON_CHARACTER_PHRASES:
+                                name = cand
                         elif not anime and any(x in k for x in ['anime', 'source', 'from', 'series', '📺', '🎬']):
                             anime = strip_field_prefix(v, ["anime", "source", "from", "series"])
                         elif not rarity and any(x in k for x in ['rarity', 'tier', 'rank', '👑', '⭐', '💎']):
-                            rarity = strip_field_prefix(v, ["rarity", "tier", "rank"])
+                            rarity = strip_field_prefix(v.rstrip(')'), ["rarity", "tier", "rank"])
                         elif not character_id and any(x in k for x in ['id', 'code', '🆔', '🔢']):
                             character_id = strip_field_prefix(v, ["id", "code"])
                         else:
                             extra_info[k] = v
 
-        # 3. Structural Bracket Fallback (e.g. [Anime Title] Character Name)
-        if not name and lines:
-            first_line = lines[0]
-            bracket_match = re.search(r'[\[\(\{](.+?)[\]\)\}](.+)', first_line)
-            if bracket_match:
-                anime_cand = clean_text(bracket_match.group(1))
-                name_cand = clean_text(bracket_match.group(2))
-                if not anime:
-                    anime = anime_cand
-                if not name:
-                    name = name_cand
+        # 4. Standalone Anime Line Fallback (e.g. "Honkai Star Rail" or "Genshin Impact")
+        if not anime:
+            for line in lines:
+                cleaned = clean_text(line).strip()
+                if cleaned.lower() in NON_CHARACTER_PHRASES:
+                    continue
+                if re.search(r'^(?:#|id\s*)?\d+\s*[:：\-—.]', cleaned):
+                    continue
+                if any(k in cleaned.lower() for k in ['rarity', 'added by', 'uploaded', 'tier', 'rank', 'photo updated', 'uploader']):
+                    continue
+                if len(cleaned) >= 2 and len(cleaned) <= 40:
+                    anime = cleaned
+                    break
 
-        # 4. Clean Fallbacks & Defaults
-        if not name:
-            if lines and not any(k in lines[0].lower() for k in ['added', 'update', 'database', 'channel']):
-                name = clean_text(lines[0])
-            else:
+        # 5. Clean Fallbacks & Defaults
+        if not name or name.lower() in NON_CHARACTER_PHRASES:
+            for line in lines:
+                cleaned = clean_text(line).strip()
+                if cleaned.lower() not in NON_CHARACTER_PHRASES and len(cleaned) >= 2:
+                    if not any(k in cleaned.lower() for k in ['added', 'update', 'database', 'channel', 'rarity', 'uploader']):
+                        name = cleaned
+                        break
+            if not name or name.lower() in NON_CHARACTER_PHRASES:
                 name = "Unknown"
+
+        name = sanitize_character_name(name)
+        anime = clean_text(anime or "Unknown")
 
         if not anime:
             anime = "Unknown"
