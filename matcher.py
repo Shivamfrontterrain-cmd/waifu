@@ -118,12 +118,12 @@ class WaifuMatcher:
             logger.warning(f"Could not load directly from GitHub ({e}). Checking local database...")
         return False
 
-    def load_index(self):
-        """Loads index prioritizing GitHub Cloud Database, falling back to local SQLite."""
-        if self.load_index_from_github():
-            return
-
+    def load_index_from_local(self) -> bool:
+        """Loads all character data and hashes directly from local SQLite database."""
         try:
+            if not self.db_path.exists():
+                return False
+
             with self.db_manager.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -134,6 +134,9 @@ class WaifuMatcher:
                     WHERE name IS NOT NULL AND name != 'Unknown'
                 """)
                 rows = cursor.fetchall()
+
+                if not rows:
+                    return False
 
                 v_loaded = []
                 u_map = {}
@@ -161,11 +164,25 @@ class WaifuMatcher:
                 self.unique_id_map = u_map
                 self.all_characters = all_chars
                 logger.info(
-                    f"⚡ Loaded {len(self.all_characters):,} characters from local SQLite. "
+                    f"⚡ Loaded {len(self.all_characters):,} characters directly from local SQLite database! "
                     f"(Visual: {len(self.visual_index):,}, Unique IDs: {len(self.unique_id_map):,})"
                 )
+                return True
         except Exception as e:
-            logger.error(f"Error loading local index: {e}")
+            logger.debug(f"Could not load local database ({e}). Trying GitHub fallback...")
+            return False
+
+    def load_index(self):
+        """Loads index: prioritizes local SQLite database, falls back to GitHub Cloud if local is absent."""
+        # 1. Prioritize live local database
+        if self.load_index_from_local():
+            return
+
+        # 2. Fallback to GitHub Cloud Database
+        if self.load_index_from_github():
+            return
+
+        logger.warning("No character records found in local database or GitHub cloud.")
 
     def find_match_by_unique_id(self, unique_id: str) -> Optional[Dict[str, Any]]:
         """Instant O(1) matching for forwarded images using Telegram file_unique_id."""
