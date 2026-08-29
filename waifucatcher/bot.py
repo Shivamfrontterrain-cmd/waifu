@@ -1,6 +1,7 @@
 import io
 import re
 import sys
+import sqlite3
 import logging
 from pathlib import Path
 from typing import Optional
@@ -66,8 +67,8 @@ async def send_character_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     """
     Sends character photo instantly via Telegram Cloud (0 local disk storage used).
     1. First checks for cached telegram_file_id
-    2. If not cached, streams thumbnail from Telegram Cloud into RAM, sends it, and caches file_id!
-    3. Falls back to text only if character has no media.
+    2. If not cached, streams photo from Telegram Cloud into RAM, sends it, and caches file_id!
+    3. Falls back to text ONLY if character has no media.
     """
     file_id = char.get("telegram_file_id")
 
@@ -87,6 +88,7 @@ async def send_character_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     # Stream photo directly from Telegram Cloud in RAM
     img_bytes = await engine.get_character_photo_bytes(char)
     if img_bytes:
+        sent_msg = None
         try:
             sent_msg = await context.bot.send_photo(
                 chat_id=chat_id,
@@ -96,20 +98,23 @@ async def send_character_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                 reply_to_message_id=reply_to,
                 reply_markup=reply_markup
             )
-            # Cache the newly generated Bot API file_id for instant subsequent sends!
-            if sent_msg and sent_msg.photo:
+        except Exception as e:
+            logger.error(f"Error sending photo stream: {e}")
+
+        if sent_msg:
+            # Cache the newly generated Bot API file_id in waifus.db for 0ms future sends!
+            if sent_msg.photo:
                 new_file_id = sent_msg.photo[-1].file_id
                 char["telegram_file_id"] = new_file_id
-                # Update shared database in background
-                with db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE characters SET telegram_file_id = ? WHERE id = ?", (new_file_id, char["id"]))
-                    conn.commit()
+                try:
+                    with sqlite3.connect(CHARACTER_DB_PATH) as w_conn:
+                        w_conn.execute("UPDATE characters SET telegram_file_id = ? WHERE id = ?", (new_file_id, char["id"]))
+                        w_conn.commit()
+                except Exception:
+                    pass
             return sent_msg
-        except Exception as e:
-            logger.debug(f"Error sending cloud photo stream: {e}")
 
-    # Fallback to rich text card if message has no photo
+    # Fallback to text banner ONLY if no photo could be streamed
     return await context.bot.send_message(
         chat_id=chat_id,
         text=caption,
