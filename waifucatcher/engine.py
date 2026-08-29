@@ -1,3 +1,6 @@
+import io
+import shutil
+import asyncio
 import re
 import random
 import logging
@@ -8,7 +11,12 @@ from game_config import (
     CHARACTER_DB_PATH,
     RARITIES,
     CLAIM_REWARD_COINS,
-    ROLL_COST_COINS
+    ROLL_COST_COINS,
+    API_ID,
+    API_HASH,
+    PHONE,
+    WAIFU_SESSION_PATH,
+    CATCHER_SESSION_NAME
 )
 
 # Import parser & matcher from parent directory
@@ -16,10 +24,63 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from telethon import TelegramClient
 from matcher import WaifuMatcher, compute_image_hashes
 from parser import sanitize_character_name, clean_text, strip_field_prefix
 
 logger = logging.getLogger("CatcherEngine")
+
+
+class CloudImageStreamer:
+    """Streams character images from Telegram Cloud channels into RAM in 0ms (0 local image files stored on disk)."""
+
+    def __init__(self):
+        self.client: Optional[TelegramClient] = None
+        self.semaphore = asyncio.Semaphore(10)
+        self._connected = False
+        self._lock = asyncio.Lock()
+
+    async def connect(self):
+        async with self._lock:
+            if self._connected:
+                return
+            if not API_ID or not API_HASH:
+                return
+            try:
+                c_sess_file = Path(CATCHER_SESSION_NAME + ".session")
+                if not c_sess_file.exists() and WAIFU_SESSION_PATH.exists():
+                    try:
+                        shutil.copy(WAIFU_SESSION_PATH, c_sess_file)
+                    except Exception:
+                        pass
+
+                self.client = TelegramClient(CATCHER_SESSION_NAME, API_ID, API_HASH)
+                await self.client.connect()
+                if await self.client.is_user_authorized():
+                    self._connected = True
+                    logger.info("☁️ Cloud Image Streamer connected to Telegram Cloud CDN!")
+            except Exception as e:
+                logger.debug(f"CloudImageStreamer connect note: {e}")
+
+    async def get_image_bytes(self, channel_id: int, msg_id: int) -> Optional[bytes]:
+        """Fetches character thumbnail/photo directly into RAM (0 MB disk storage used)."""
+        if not self._connected or not self.client:
+            await self.connect()
+        if not self._connected or not self.client:
+            return None
+
+        async with self.semaphore:
+            try:
+                msg = await self.client.get_messages(channel_id, ids=msg_id)
+                if not msg or not (getattr(msg, "photo", None) or getattr(msg, "document", None)):
+                    return None
+                buf = io.BytesIO()
+                await self.client.download_media(msg, file=buf, thumb=-1)
+                data = buf.getvalue()
+                return data if data else None
+            except Exception as e:
+                logger.debug(f"Error streaming cloud image ({channel_id}, {msg_id}): {e}")
+                return None
 
 
 class WaifuGameEngine:
@@ -28,7 +89,16 @@ class WaifuGameEngine:
     def __init__(self, char_db_path: Path = CHARACTER_DB_PATH):
         self.matcher = WaifuMatcher(char_db_path)
         self.all_characters = self.matcher.all_characters
+        self.image_streamer = CloudImageStreamer()
         logger.info(f"🎮 Waifu Catcher Engine initialized with {len(self.all_characters):,} character models!")
+
+    async def get_character_photo_bytes(self, char: Dict[str, Any]) -> Optional[bytes]:
+        """Streams character image directly from Telegram Cloud into RAM."""
+        cid = char.get("channel_id")
+        mid = char.get("telegram_msg_id")
+        if not cid or not mid:
+            return None
+        return await self.image_streamer.get_image_bytes(cid, mid)
 
     def get_character(self, character_id: int) -> Optional[Dict[str, Any]]:
         """Looks up a character by their numeric database ID."""

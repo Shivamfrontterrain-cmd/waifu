@@ -13,6 +13,14 @@ load_dotenv(PROJECT_ROOT / ".env")
 # Telegram Bot Credentials
 BOT_TOKEN = os.getenv("CATCHER_BOT_TOKEN", "").strip() or os.getenv("BOT_TOKEN", "").strip()
 
+# Telegram MTProto User API Credentials (for zero-disk cloud image streaming)
+API_ID_RAW = os.getenv("TG_API_ID", "").strip()
+API_ID = int(API_ID_RAW) if API_ID_RAW.isdigit() else None
+API_HASH = os.getenv("TG_API_HASH", "").strip()
+PHONE = os.getenv("TG_PHONE", "").strip()
+WAIFU_SESSION_PATH = PROJECT_ROOT / "waifu_session.session"
+CATCHER_SESSION_NAME = str(CATCHER_DIR / "catcher_session")
+
 # Database Paths
 DATABASE_DIR = PROJECT_ROOT / "database"
 DATABASE_DIR.mkdir(parents=True, exist_ok=True)

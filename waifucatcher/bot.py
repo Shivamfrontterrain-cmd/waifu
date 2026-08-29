@@ -65,7 +65,9 @@ def get_sender_info(update: Update):
 async def send_character_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int, char: dict, caption: str, reply_to: Optional[int] = None, reply_markup=None):
     """
     Sends character photo instantly via Telegram Cloud (0 local disk storage used).
-    Uses telegram_file_id if available, falling back to text if file_id cannot be served directly.
+    1. First checks for cached telegram_file_id
+    2. If not cached, streams thumbnail from Telegram Cloud into RAM, sends it, and caches file_id!
+    3. Falls back to text only if character has no media.
     """
     file_id = char.get("telegram_file_id")
 
@@ -80,9 +82,34 @@ async def send_character_photo(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                 reply_markup=reply_markup
             )
         except Exception as e:
-            logger.debug(f"Could not send via file_id ({e}), falling back to text banner...")
+            logger.debug(f"Could not send via file_id ({e}), fetching fresh cloud stream...")
 
-    # Fallback to rich text card
+    # Stream photo directly from Telegram Cloud in RAM
+    img_bytes = await engine.get_character_photo_bytes(char)
+    if img_bytes:
+        try:
+            sent_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=img_bytes,
+                caption=caption,
+                parse_mode=constants.ParseMode.MARKDOWN,
+                reply_to_message_id=reply_to,
+                reply_markup=reply_markup
+            )
+            # Cache the newly generated Bot API file_id for instant subsequent sends!
+            if sent_msg and sent_msg.photo:
+                new_file_id = sent_msg.photo[-1].file_id
+                char["telegram_file_id"] = new_file_id
+                # Update shared database in background
+                with db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE characters SET telegram_file_id = ? WHERE id = ?", (new_file_id, char["id"]))
+                    conn.commit()
+            return sent_msg
+        except Exception as e:
+            logger.debug(f"Error sending cloud photo stream: {e}")
+
+    # Fallback to rich text card if message has no photo
     return await context.bot.send_message(
         chat_id=chat_id,
         text=caption,
