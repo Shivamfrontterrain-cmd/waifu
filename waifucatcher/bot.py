@@ -137,7 +137,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎮 **Catching & Spawning:**\n"
         "• `/catch <name>` or `/grab <name>` — Catch active wild waifu\n"
-        "• `/spawn` or `/drop` — Spawn a wild character now\n\n"
+        "• `/spawn` or `/drop` — Spawn a wild character in group\n"
+        "• `/testspawn` — Test spawn with answer spoiler (works in DMs & groups)\n"
+        "• `/testspawn <name/id>` — Test spawn specific character (e.g. `/testspawn Gojo`)\n"
+        "• `/spawndebug` — Inspect active spawn state\n"
+        "• `/clearspawn` — Clear active spawn immediately\n\n"
         "🎰 **Gacha & Collection:**\n"
         "• `/roll` or `/gacha` — Summon a random waifu (100 Coins)\n"
         "• `/harem` or `/collection` — Browse your collected waifus\n"
@@ -172,6 +176,96 @@ async def spawn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if spawn_msg:
         db.set_active_spawn(chat.id, char["id"], spawn_msg.message_id)
+
+
+async def testspawn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Spawns a character specifically for testing game mechanics.
+    Usage:
+    • /testspawn — Spawns a random character
+    • /testspawn <id> — Spawns specific character by ID (e.g. /testspawn 42)
+    • /testspawn <name> — Spawns specific character by name (e.g. /testspawn Gojo)
+    """
+    chat = update.effective_chat
+    query = " ".join(context.args).strip() if context.args else None
+
+    char = None
+    if query:
+        if query.isdigit():
+            char = engine.get_character(int(query))
+        else:
+            results = engine.matcher.search_by_name(query, limit=1)
+            if results:
+                char = results[0]
+
+    if not char:
+        char = engine.get_random_spawn()
+
+    if not char:
+        await update.message.reply_text("❌ No characters available in database.")
+        return
+
+    name = sanitize_character_name(char.get("name") or "Unknown")
+    anime = clean_text(char.get("anime") or "Unknown")
+    rarity, color, _ = engine.get_rarity_info(char.get("rarity"))
+    cid = char.get("character_id") or char.get("id")
+
+    test_caption = (
+        "🧪 **[SPAWN TEST MODE ACTIVE]** 🧪\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🌸 **A WILD WAIFU APPEARED!** 🌸\n"
+        f"🎬 **Anime:** *{anime}*\n"
+        f"👑 **Rarity:** {color} **{rarity}**\n"
+        f"🆔 **Card ID:** `#{cid}`\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 **Answer Spoiler:** ||`{name}`||\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 **Test claiming now:**\n"
+        f"• Type: `/catch {name}` (or `/grab`, `/claim`)\n"
+        "• Or send a screenshot/photo to test visual matching!"
+    )
+
+    spawn_msg = await send_character_photo(context, chat.id, char, test_caption)
+    if spawn_msg:
+        db.set_active_spawn(chat.id, char["id"], spawn_msg.message_id)
+
+
+async def spawndebug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays active spawn debug info for the current chat."""
+    chat = update.effective_chat
+    active_spawn = db.get_active_spawn(chat.id)
+    if not active_spawn:
+        await update.message.reply_text(
+            "ℹ️ **No active spawn in this chat.**\nUse `/spawn` or `/testspawn` to create one.",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+        return
+
+    char_id, msg_id = active_spawn
+    char = engine.get_character(char_id)
+    if char:
+        name = sanitize_character_name(char.get("name") or "Unknown")
+        anime = clean_text(char.get("anime") or "Unknown")
+        has_phash = bool(char.get("image_phash"))
+        has_file_id = bool(char.get("telegram_file_id"))
+
+        await update.message.reply_text(
+            f"🎯 **Active Spawn Debug:**\n"
+            f"• **Card ID:** `#{char_id}`\n"
+            f"• **Character:** ||`{name}`||\n"
+            f"• **Anime:** *{anime}*\n"
+            f"• **Spawn Msg ID:** `{msg_id}`\n"
+            f"• **Visual Hash Ready:** `{'✅ Yes' if has_phash else '❌ No'}`\n"
+            f"• **Cloud File ID Ready:** `{'✅ Yes' if has_file_id else '❌ No'}`",
+            parse_mode=constants.ParseMode.MARKDOWN
+        )
+
+
+async def clearspawn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clears the active spawn for this chat."""
+    chat = update.effective_chat
+    db.clear_active_spawn(chat.id)
+    await update.message.reply_text("🧹 **Active spawn cleared for this chat!**", parse_mode=constants.ParseMode.MARKDOWN)
 
 
 async def catch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,6 +761,9 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("spawn", spawn_command))
     app.add_handler(CommandHandler("drop", spawn_command))
+    app.add_handler(CommandHandler(["testspawn", "spawntest", "forcespawn", "testdrop"], testspawn_command))
+    app.add_handler(CommandHandler(["spawndebug", "spawns", "currentspawn"], spawndebug_command))
+    app.add_handler(CommandHandler(["clearspawn", "despawn"], clearspawn_command))
     app.add_handler(CommandHandler(["catch", "grab", "claim"], catch_command))
     app.add_handler(CommandHandler(["roll", "gacha", "pull"], roll_command))
     app.add_handler(CommandHandler(["harem", "collection", "mywaifus"], harem_command))

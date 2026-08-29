@@ -23,9 +23,12 @@ A high-performance, full-featured **Telegram Gacha & Waifu Collecting Bot** runn
 | Command | Description |
 | :--- | :--- |
 | `/catch <name>` | Guess and claim the active wild character in the chat |
-| `/grab <name>` | Alias for `/catch` |
-| `/claim <name>` | Alias for `/catch` |
+| `/grab <name>` / `/claim <name>` | Aliases for `/catch` |
 | `/spawn` / `/drop` | Manually spawn a wild character card |
+| `/testspawn` | Test spawn with answer spoiler (works in DMs & groups) |
+| `/testspawn <name/id>` | Test spawn a specific character (e.g. `/testspawn Gojo`) |
+| `/spawndebug` | Inspect active spawn details & cloud file ID status |
+| `/clearspawn` | Force clear the active spawn immediately |
 
 ### 🎰 Gacha & Collection
 | Command | Description |
